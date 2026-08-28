@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Convert Bink 2 (.bk2) videos to VP9 WebM with alpha and audio entirely in your browser.">
+  <meta name="description" content="Convert Bink 2 (.bk2) videos to WebM with alpha and audio entirely in your browser.">
   <title>Bink2 → WebM</title>
   <script src="./coi-serviceworker.js"></script>
   <style>
@@ -22,7 +22,7 @@
 <body>
 <main>
   <h1>Bink2 → WebM</h1>
-  <p>Decode Bink 2 entirely in your browser and encode it as VP9 WebM. Alpha is preserved when present, and Bink audio tracks are transcoded to Opus. Files never leave your device.</p>
+  <p>Decode Bink 2 entirely in your browser. Non-transparent videos use the faster VP8 path, alpha videos use VP9-alpha, and Bink audio is transcoded to Opus. Files never leave your device.</p>
 
   <section class="panel">
     <label id="drop" for="file">
@@ -39,7 +39,7 @@
         <input id="crf" type="number" min="0" max="63" value="18" size="3">
       </label>
       <label class="control">Speed
-        <select id="cpu"><option value="3">slower</option><option value="5" selected>balanced</option><option value="7">faster</option><option value="8">fastest</option></select>
+        <select id="cpu"><option value="3">slower</option><option value="5">balanced</option><option value="7">faster</option><option value="8" selected>fastest</option></select>
       </label>
       <button id="convert" disabled>Convert</button>
       <span id="coreStatus" class="status">Loading decoder…</span>
@@ -50,11 +50,11 @@
 
   <section id="result" class="panel hidden">
     <div class="row">
-      <div><strong>VP9 WebM</strong><div id="outInfo" class="fine"></div></div>
+      <div><strong id="resultTitle">WebM</strong><div id="outInfo" class="fine"></div></div>
       <a id="download" class="download disabled" download>Download WebM</a>
     </div>
     <div class="preview"><video id="preview" controls loop playsinline></video></div>
-    <p class="fine">For alpha videos, the checkerboard is the page background. Seeing it through the video confirms transparent playback.</p>
+    <p id="previewNote" class="fine"></p>
   </section>
 
   <details class="panel"><summary>Decoder log</summary><div id="log" class="log"></div></details>
@@ -63,12 +63,12 @@
 (() => {
   const $ = id => document.getElementById(id);
   const fileInput=$('file'),drop=$('drop'),meta=$('meta'),convert=$('convert'),coreStatus=$('coreStatus');
-  const progressWrap=$('progressWrap'),progress=$('progress'),error=$('error'),result=$('result'),preview=$('preview'),download=$('download'),outInfo=$('outInfo'),log=$('log');
-  let selected=null,selectedHeader=null,coreReady=false,busy=false,outputURL=null,coreThreads=1;
+  const progressWrap=$('progressWrap'),progress=$('progress'),error=$('error'),result=$('result'),preview=$('preview'),download=$('download'),outInfo=$('outInfo'),log=$('log'),resultTitle=$('resultTitle'),previewNote=$('previewNote');
+  let selected=null,selectedHeader=null,coreReady=false,busy=false,outputURL=null,coreThreads=1,workerFS=false,startTime=0,lastProgressTime=0,lastProgressFrame=0;
 
   if(!window.crossOriginIsolated){
     coreStatus.textContent=window.isSecureContext?'Enabling multithreaded decoder…':'Threaded decoder requires HTTPS or localhost';
-    if(!window.isSecureContext)showError('This build uses SharedArrayBuffer for multithreaded VP9 encoding and must be served from HTTPS or localhost.');
+    if(!window.isSecureContext)showError('This build uses SharedArrayBuffer for multithreaded encoding and must be served from HTTPS or localhost.');
     return;
   }
 
@@ -76,21 +76,36 @@
   worker.onmessage=e=>{
     const m=e.data||{};
     if(m.type==='ready'){
-      coreThreads=m.threads||1;coreReady=true;coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;updateConvert();
+      coreThreads=m.threads||1;workerFS=!!m.workerfs;coreReady=true;coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;updateConvert();
     }else if(m.type==='progress'){
       progressWrap.classList.remove('hidden');
       if(m.total>0)progress.style.width=Math.min(100,m.frame/m.total*100)+'%';
-      coreStatus.textContent=m.total>0?`Encoding frame ${m.frame}/${m.total} · ${coreThreads} threads`:`Encoding frame ${m.frame} · ${coreThreads} threads`;
+      const now=performance.now();
+      let speed='';
+      if(lastProgressTime && m.frame>lastProgressFrame){
+        const fps=(m.frame-lastProgressFrame)/((now-lastProgressTime)/1000);
+        if(fps>0){
+          const remain=m.total>m.frame?Math.round((m.total-m.frame)/fps):0;
+          speed=` · ${fps.toFixed(1)} fps${remain?` · ~${formatTime(remain)} left`:''}`;
+        }
+      }
+      if(!lastProgressTime || now-lastProgressTime>=1000){lastProgressTime=now;lastProgressFrame=m.frame}
+      coreStatus.textContent=m.total>0?`Encoding ${m.frame}/${m.total} · ${coreThreads} threads${speed}`:`Encoding frame ${m.frame} · ${coreThreads} threads`;
     }else if(m.type==='done'){
-      busy=false;coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;progress.style.width='100%';
+      busy=false;progress.style.width='100%';
+      const elapsed=(performance.now()-startTime)/1000;
+      coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;
       const blob=new Blob([m.data],{type:'video/webm'});
       if(outputURL)URL.revokeObjectURL(outputURL);
       outputURL=URL.createObjectURL(blob);preview.src=outputURL;preview.load();
       download.href=outputURL;download.download=(selected?.name||'video').replace(/\.bk2$/i,'')+'.webm';download.classList.remove('disabled');
-      const audio=selectedHeader?.tracks?` · ${selectedHeader.tracks} Opus audio track${selectedHeader.tracks===1?'':'s'}`:' · no audio';
-      outInfo.textContent=`${formatBytes(blob.size)} · ${m.frames} frames${audio} · ${m.threads||coreThreads} threads`;result.classList.remove('hidden');updateConvert();
+      const audio=m.surroundDownmix?'stereo Opus (8-channel Bink downmix)':m.audioTracks?`${m.audioTracks} Opus audio stream${m.audioTracks===1?'':'s'}`:'no audio';
+      resultTitle.textContent=`${m.codec||'WebM'} WebM`;
+      outInfo.textContent=`${formatBytes(blob.size)} · ${m.frames} frames · ${audio} · ${elapsed.toFixed(1)} s`;
+      previewNote.textContent=selectedHeader?.alpha?'The checkerboard is the page background. Seeing it through the video confirms transparent playback.':'Audio is preserved when present. The source file is read directly from disk without first copying it into the WASM heap.';
+      result.classList.remove('hidden');updateConvert();
     }else if(m.type==='error'){
-      busy=false;coreStatus.textContent=coreReady?`Decoder ready · ${coreThreads} threads`:'Decoder error';showError(m.message||'Conversion failed');updateConvert();
+      busy=false;coreStatus.textContent=coreReady?`Decoder ready · ${coreThreads} threads`:'Decoder error';showError(m.message||'Conversion failed.');updateConvert();
     }else if(m.type==='log'){
       log.textContent+=(m.text||'')+'\n';log.scrollTop=log.scrollHeight;
     }
@@ -98,6 +113,7 @@
   worker.onerror=e=>{showError(`Worker error: ${e.message}`);coreStatus.textContent='Decoder error'};
 
   function formatBytes(n){if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KiB';return(n/1048576).toFixed(1)+' MiB'}
+  function formatTime(s){if(s<60)return`${s}s`;const m=Math.floor(s/60),r=s%60;return`${m}m ${r}s`}
   function showError(s){error.textContent=s;error.classList.remove('hidden')}
   function clearError(){error.textContent='';error.classList.add('hidden')}
   function updateConvert(){convert.disabled=!selected||!coreReady||busy}
@@ -110,8 +126,9 @@
     return{magic,frames,width,height,fpsNum,fpsDen,flags,tracks,alpha:!!(flags&0x00100000)};
   }
   function renderMeta(f,h){
-    const fps=h.fpsDen?h.fpsNum/h.fpsDen:0;
-    const items=[['File',f.name],['Revision',h.magic],['Size',formatBytes(f.size)],['Resolution',`${h.width}×${h.height}`],['Frames',String(h.frames)],['Frame rate',fps?`${fps.toFixed(3).replace(/\.000$/,'')} fps`:'unknown'],['Alpha',h.alpha?'yes':'no'],['Audio tracks',String(h.tracks)]];
+    const fps=h.fpsDen?h.fpsNum/h.fpsDen:0,codec=h.alpha?'VP9-alpha':'VP8 fast path';
+    const audio=h.tracks===8?'8-channel Bink → stereo Opus':h.tracks?`${h.tracks} track${h.tracks===1?'':'s'} → Opus`:'none';
+    const items=[['File',f.name],['Revision',h.magic],['Size',formatBytes(f.size)],['Resolution',`${h.width}×${h.height}`],['Frames',String(h.frames)],['Frame rate',fps?`${fps.toFixed(3).replace(/\.000$/,'')} fps`:'unknown'],['Alpha',h.alpha?'yes':'no'],['Output video',codec],['Audio',audio]];
     meta.innerHTML=items.map(([k,v])=>`<div class="datum"><span>${k}</span><b>${escapeHTML(v)}</b></div>`).join('');meta.classList.remove('hidden');
   }
   function escapeHTML(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -125,11 +142,13 @@
   for(const ev of ['dragenter','dragover'])drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')});
   for(const ev of ['dragleave','drop'])drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag')});
   drop.addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f)chooseFile(f)});
-  convert.addEventListener('click',async()=>{
+  convert.addEventListener('click',()=>{
     if(!selected||!coreReady||busy)return;
-    busy=true;clearError();result.classList.add('hidden');download.classList.add('disabled');progressWrap.classList.remove('hidden');progress.style.width='0';coreStatus.textContent='Reading input…';updateConvert();
-    try{const data=await selected.arrayBuffer();worker.postMessage({type:'convert',data,crf:Number($('crf').value),cpuUsed:Number($('cpu').value),threads:coreThreads},[data])}
-    catch(e){busy=false;showError(e.message);coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;updateConvert()}
+    busy=true;clearError();result.classList.add('hidden');download.classList.add('disabled');progressWrap.classList.remove('hidden');progress.style.width='0';coreStatus.textContent=workerFS?'Opening input directly…':'Preparing input…';updateConvert();
+    startTime=performance.now();lastProgressTime=0;lastProgressFrame=0;
+    try{
+      worker.postMessage({type:'convert',file:selected,crf:Number($('crf').value),cpuUsed:Number($('cpu').value),threads:coreThreads,alpha:selectedHeader.alpha,audioTracks:selectedHeader.tracks});
+    }catch(e){busy=false;showError(e.message);coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;updateConvert()}
   });
 })();
 </script>
