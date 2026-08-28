@@ -2,6 +2,8 @@ let core = null;
 let initializing = null;
 let converting = false;
 
+const hardwareThreads = Math.max(1, Math.min(8, self.navigator?.hardwareConcurrency || 4));
+
 function send(type, payload = {}, transfer = []) {
   self.postMessage({ type, ...payload }, transfer);
 }
@@ -20,7 +22,7 @@ async function init() {
         print(text) { send('log', { text }); },
         printErr(text) { send('log', { text: '[stderr] ' + text }); }
       });
-      send('ready');
+      send('ready', { threads: hardwareThreads });
       return core;
     } catch (err) {
       send('error', { message: 'Could not load the Bink2 decoder: ' + (err?.message || String(err)) });
@@ -43,11 +45,13 @@ async function convert(message) {
     m.FS.writeFile(input, new Uint8Array(message.data));
     const crf = Number.isFinite(message.crf) ? message.crf : 18;
     const cpuUsed = Number.isFinite(message.cpuUsed) ? message.cpuUsed : 5;
+    const requestedThreads = Number.isFinite(message.threads) ? message.threads : hardwareThreads;
+    const threads = Math.max(1, Math.min(8, requestedThreads));
     const frames = m.ccall(
       'transcode_bk2',
       'number',
-      ['string', 'string', 'number', 'number'],
-      [input, output, crf, cpuUsed]
+      ['string', 'string', 'number', 'number', 'number'],
+      [input, output, crf, cpuUsed, threads]
     );
 
     if (frames < 0) {
@@ -58,7 +62,7 @@ async function convert(message) {
 
     const bytes = m.FS.readFile(output);
     const result = bytes.slice().buffer;
-    send('done', { data: result, frames }, [result]);
+    send('done', { data: result, frames, threads }, [result]);
   } finally {
     try { m.FS.unlink(input); } catch (_) {}
     try { m.FS.unlink(output); } catch (_) {}
