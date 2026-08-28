@@ -8,12 +8,28 @@
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
 
+/* This file is linked with native_checkpoints.h force-included. It must call the
+   real FFmpeg functions internally rather than the interception wrappers. */
+#ifdef avformat_open_input
+#undef avformat_open_input
+#endif
+#ifdef avformat_close_input
+#undef avformat_close_input
+#endif
+#ifdef avio_closep
+#undef avio_closep
+#endif
+
 #define OPFS_AVIO_BUFFER_SIZE (256 * 1024)
 
 typedef struct Bink2OpfsIO {
     int64_t pos;
     int is_output;
 } Bink2OpfsIO;
+
+EM_JS(int, bink2_opfs_is_active_js, (), {
+    return Module['bink2OpfsInputHandle'] && Module['bink2OpfsOutputHandle'] ? 1 : 0;
+});
 
 EM_JS(int, bink2_opfs_input_read_js, (uint8_t *buf, int size, double pos), {
     const handle = Module['bink2OpfsInputHandle'];
@@ -76,6 +92,10 @@ EM_JS(double, bink2_opfs_output_size_js, (), {
         return -1;
     }
 });
+
+int bink2_opfs_is_active(void) {
+    return bink2_opfs_is_active_js();
+}
 
 static double opfs_size(const Bink2OpfsIO *io) {
     return io && io->is_output ? bink2_opfs_output_size_js()
@@ -192,7 +212,7 @@ int bink2_opfs_open_input(AVFormatContext **ctx, const char *label) {
 
     fmt->pb = pb;
     fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
-    fprintf(stderr, "[bink2-opfs] opening input through synchronous OPFS AVIO\n");
+    fprintf(stderr, "[bink2-opfs] input reading directly from OPFS\n");
     fflush(stderr);
 
     ret = avformat_open_input(&fmt, label, NULL, NULL);
@@ -207,18 +227,13 @@ int bink2_opfs_open_input(AVFormatContext **ctx, const char *label) {
     return 0;
 }
 
-int bink2_opfs_attach_output(AVFormatContext *ctx) {
-    AVIOContext *pb;
-    if (!ctx)
-        return AVERROR(EINVAL);
-
-    pb = make_opfs_avio(1);
+int bink2_opfs_open_output(AVIOContext **pb) {
     if (!pb)
+        return AVERROR(EINVAL);
+    *pb = make_opfs_avio(1);
+    if (!*pb)
         return AVERROR(ENOMEM);
-
-    ctx->pb = pb;
-    ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
-    fprintf(stderr, "[bink2-opfs] WebM output streaming directly to OPFS\n");
+    fprintf(stderr, "[bink2-opfs] WebM writing directly to OPFS\n");
     fflush(stderr);
     return 0;
 }
@@ -232,12 +247,10 @@ void bink2_opfs_close_input(AVFormatContext **ctx) {
     free_opfs_avio(&pb);
 }
 
-void bink2_opfs_close_output(AVFormatContext *ctx) {
-    AVIOContext *pb;
-    if (!ctx || !ctx->pb)
-        return;
-    avio_flush(ctx->pb);
-    pb = ctx->pb;
-    ctx->pb = NULL;
-    free_opfs_avio(&pb);
+int bink2_opfs_close_output(AVIOContext **pb) {
+    if (!pb || !*pb)
+        return 0;
+    avio_flush(*pb);
+    free_opfs_avio(pb);
+    return 0;
 }
