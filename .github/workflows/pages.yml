@@ -1,0 +1,186 @@
+name: Build and deploy Bink2 converter
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EMSDK_VERSION: 6.0.1
+      PREFIX: ${{ github.workspace }}/wasm-prefix
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config autoconf automake libtool nasm yasm curl
+
+      - name: Setup Emscripten
+        uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: emsdk-cache
+
+      - name: Fetch FFmpeg 7.1.2 and patch Bink2
+        run: |
+          git clone --depth 1 --branch n7.1.2 https://github.com/FFmpeg/FFmpeg.git ffmpeg
+          curl -fL https://raw.githubusercontent.com/sharpemu/ffmpeg-core/master/bink2.patch -o bink2.patch
+          cd ffmpeg
+          git apply ../bink2.patch
+          sed -i 's/c->has_alpha = c->flags & BINK_FLAG_ALPHA;/c->has_alpha = !!(c->flags \& BINK_FLAG_ALPHA);/' libavcodec/bink2.c
+          grep -F 'c->has_alpha = !!(c->flags & BINK_FLAG_ALPHA);' libavcodec/bink2.c
+
+      - name: Build libvpx VP9 encoder for WASM
+        run: |
+          git clone --depth 1 --branch v1.16.0 https://chromium.googlesource.com/webm/libvpx libvpx
+          mkdir -p "$PREFIX"
+          cd libvpx
+          emconfigure ./configure \
+            --prefix="$PREFIX" \
+            --target=generic-gnu \
+            --disable-shared \
+            --enable-static \
+            --disable-examples \
+            --disable-tools \
+            --disable-docs \
+            --disable-unit-tests \
+            --disable-vp8 \
+            --enable-vp9 \
+            --enable-vp9-encoder \
+            --disable-vp9-decoder \
+            --disable-multithread \
+            --disable-runtime-cpu-detect \
+            --disable-webm-io \
+            --disable-libyuv \
+            --extra-cflags=-Oz
+          emmake make -j"$(nproc)"
+          emmake make install
+
+      - name: Configure compact FFmpeg libraries
+        run: |
+          cd ffmpeg
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+          emconfigure ./configure \
+            --target-os=none \
+            --arch=x86_32 \
+            --enable-cross-compile \
+            --disable-x86asm \
+            --disable-inline-asm \
+            --disable-stripping \
+            --disable-doc \
+            --disable-debug \
+            --disable-autodetect \
+            --disable-all \
+            --disable-network \
+            --disable-iconv \
+            --disable-runtime-cpudetect \
+            --disable-pthreads \
+            --disable-w32threads \
+            --disable-os2threads \
+            --disable-programs \
+            --enable-avcodec \
+            --enable-avformat \
+            --enable-decoder=bink2,binkaudio_dct,binkaudio_rdft \
+            --enable-demuxer=bink \
+            --enable-muxer=webm \
+            --enable-encoder=libvpx_vp9 \
+            --enable-bsf=vp9_superframe \
+            --enable-protocol=file \
+            --enable-libvpx \
+            --cc=emcc \
+            --cxx=em++ \
+            --ar=emar \
+            --ranlib=emranlib \
+            --nm=emnm \
+            --pkg-config-flags=--static \
+            --optflags=-Oz \
+            --extra-cflags="-Oz -I$PREFIX/include" \
+            --extra-ldflags="-Oz -L$PREFIX/lib"
+          grep -E 'CONFIG_BINK2_DECODER=yes|CONFIG_LIBVPX_VP9_ENCODER=yes|CONFIG_BINK_DEMUXER=yes|CONFIG_WEBM_MUXER=yes|CONFIG_VP9_SUPERFRAME_BSF=yes' ffbuild/config.mak
+
+      - name: Build FFmpeg libraries
+        run: |
+          cd ffmpeg
+          emmake make -j"$(nproc)" \
+            libavformat/libavformat.a \
+            libavcodec/libavcodec.a \
+            libavutil/libavutil.a
+
+      - name: Link browser transcoder module
+        run: |
+          mkdir -p dist
+          emcc src/bink2_transcode.c \
+            -Iffmpeg \
+            ffmpeg/libavformat/libavformat.a \
+            ffmpeg/libavcodec/libavcodec.a \
+            ffmpeg/libavutil/libavutil.a \
+            "$PREFIX/lib/libvpx.a" \
+            -lm -Oz --no-entry \
+            -sMODULARIZE=1 \
+            -sEXPORT_NAME=createBink2Core \
+            -sENVIRONMENT=worker \
+            -sFORCE_FILESYSTEM=1 \
+            -sALLOW_MEMORY_GROWTH=1 \
+            -sINITIAL_MEMORY=268435456 \
+            -sMAXIMUM_MEMORY=2147483648 \
+            -sEXPORTED_FUNCTIONS='["_transcode_bk2","_bink2_last_error"]' \
+            -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","ccall"]' \
+            -o dist/bink2-core.js
+          cp ffmpeg/COPYING.LGPLv2.1 dist/
+          cp libvpx/LICENSE dist/LICENSE.libvpx
+          file dist/*
+          du -h dist/*
+
+      - name: Assemble static site
+        run: |
+          rm -rf _site
+          mkdir -p _site/core
+          cp index.html bink2-worker.js _site/
+          cp dist/* _site/core/
+          touch _site/.nojekyll
+
+      - name: Upload WASM core artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bink2-web-core
+          path: dist
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
