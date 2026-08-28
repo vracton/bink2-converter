@@ -36,33 +36,48 @@ async function init() {
   return initializing;
 }
 
-async function prepareInput(module, message, jobId) {
-  const mountpoint = '/source';
-  const mountedInput = `${mountpoint}/input.bk2`;
-  const copiedInput = '/input.bk2';
-  const workerFS = getWorkerFS(module);
+async function stageBrowserFile(module, file, path, jobId) {
+  const CHUNK_SIZE = 16 * 1024 * 1024;
+  const size = file.size;
 
-  if (message.file && workerFS) {
-    try { module.FS.mkdir(mountpoint); } catch (_) {}
-    try {
-      module.FS.mount(workerFS, { blobs: [{ name: 'input.bk2', data: message.file }] }, mountpoint);
-      send('input-mode', { jobId, mode: 'direct' });
-      return { path: mountedInput, mounted: true, mountpoint };
-    } catch (error) {
-      send('log', { text: `[workerfs] Direct file mount failed; using safe memory fallback: ${error?.message || error}` });
-      try { module.FS.unmount(mountpoint); } catch (_) {}
+  module.FS.writeFile(path, new Uint8Array(0));
+  module.FS.truncate(path, size);
+  const stream = module.FS.open(path, 'r+');
+  try {
+    let loaded = 0;
+    while (loaded < size) {
+      const end = Math.min(size, loaded + CHUNK_SIZE);
+      const chunk = new Uint8Array(await file.slice(loaded, end).arrayBuffer());
+      module.FS.write(stream, chunk, 0, chunk.byteLength, loaded);
+      loaded = end;
+      send('input-progress', { jobId, loaded, total: size });
     }
+  } finally {
+    module.FS.close(stream);
+  }
+}
+
+async function prepareInput(module, message, jobId) {
+  const copiedInput = '/input.bk2';
+
+  // FFmpeg performs many small seeks while probing Bink. Reading those through
+  // WORKERFS turns each seek into a synchronous Blob read and can leave large
+  // files at frame 0 for a long time. Stage into MEMFS once instead. Chunking
+  // avoids holding a second full-file ArrayBuffer in JavaScript while copying.
+  if (message.file) {
+    send('input-mode', { jobId, mode: 'staged' });
+    await stageBrowserFile(module, message.file, copiedInput, jobId);
+    return { path: copiedInput };
   }
 
-  let buffer = message.data || null;
-  if (!buffer && message.file && typeof message.file.arrayBuffer === 'function') {
-    send('input-mode', { jobId, mode: 'copy' });
-    buffer = await message.file.arrayBuffer();
+  if (message.data) {
+    send('input-mode', { jobId, mode: 'memory' });
+    module.FS.writeFile(copiedInput, new Uint8Array(message.data));
+    send('input-progress', { jobId, loaded: message.data.byteLength, total: message.data.byteLength });
+    return { path: copiedInput };
   }
-  if (!buffer) throw new Error('No BK2 input was provided.');
 
-  module.FS.writeFile(copiedInput, new Uint8Array(buffer));
-  return { path: copiedInput, mounted: false, mountpoint };
+  throw new Error('No BK2 input was provided.');
 }
 
 async function convert(message) {
@@ -113,9 +128,6 @@ async function convert(message) {
   } finally {
     try { module.FS.unlink(output); } catch (_) {}
     try { module.FS.unlink('/input.bk2'); } catch (_) {}
-    if (inputInfo?.mounted) {
-      try { module.FS.unmount(inputInfo.mountpoint); } catch (_) {}
-    }
     converting = false;
   }
 }
