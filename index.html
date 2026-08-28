@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Convert Bink 2 (.bk2) videos to transparent VP9 WebM entirely in your browser.">
-  <title>Bink2 → Transparent WebM</title>
+  <meta name="description" content="Convert Bink 2 (.bk2) videos to VP9 WebM with alpha and audio entirely in your browser.">
+  <title>Bink2 → WebM</title>
+  <script src="./coi-serviceworker.js"></script>
   <style>
     :root{color-scheme:dark;--bg:#0f1015;--panel:#181a22;--line:#303441;--text:#f5f6fa;--muted:#9ca3b3;--accent:#8ba4ff;--bad:#ff8080}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
@@ -20,8 +21,8 @@
 </head>
 <body>
 <main>
-  <h1>Bink2 → Transparent WebM</h1>
-  <p>Decode Bink 2 entirely in your browser and encode it as VP9 WebM with the alpha channel preserved. Files never leave your device.</p>
+  <h1>Bink2 → WebM</h1>
+  <p>Decode Bink 2 entirely in your browser and encode it as VP9 WebM. Alpha is preserved when present, and Bink audio tracks are transcoded to Opus. Files never leave your device.</p>
 
   <section class="panel">
     <label id="drop" for="file">
@@ -49,11 +50,11 @@
 
   <section id="result" class="panel hidden">
     <div class="row">
-      <div><strong>Transparent VP9 WebM</strong><div id="outInfo" class="fine"></div></div>
+      <div><strong>VP9 WebM</strong><div id="outInfo" class="fine"></div></div>
       <a id="download" class="download disabled" download>Download WebM</a>
     </div>
-    <div class="preview"><video id="preview" controls loop muted playsinline></video></div>
-    <p class="fine">The checkerboard is the page background, not part of the video. If you can see it through the video, alpha playback is working.</p>
+    <div class="preview"><video id="preview" controls loop playsinline></video></div>
+    <p class="fine">For alpha videos, the checkerboard is the page background. Seeing it through the video confirms transparent playback.</p>
   </section>
 
   <details class="panel"><summary>Decoder log</summary><div id="log" class="log"></div></details>
@@ -63,26 +64,33 @@
   const $ = id => document.getElementById(id);
   const fileInput=$('file'),drop=$('drop'),meta=$('meta'),convert=$('convert'),coreStatus=$('coreStatus');
   const progressWrap=$('progressWrap'),progress=$('progress'),error=$('error'),result=$('result'),preview=$('preview'),download=$('download'),outInfo=$('outInfo'),log=$('log');
-  let selected=null,coreReady=false,busy=false,outputURL=null;
+  let selected=null,selectedHeader=null,coreReady=false,busy=false,outputURL=null,coreThreads=1;
+
+  if(!window.crossOriginIsolated){
+    coreStatus.textContent=window.isSecureContext?'Enabling multithreaded decoder…':'Threaded decoder requires HTTPS or localhost';
+    if(!window.isSecureContext)showError('This build uses SharedArrayBuffer for multithreaded VP9 encoding and must be served from HTTPS or localhost.');
+    return;
+  }
 
   const worker=new Worker('./bink2-worker.js');
   worker.onmessage=e=>{
     const m=e.data||{};
     if(m.type==='ready'){
-      coreReady=true;coreStatus.textContent='Decoder ready';updateConvert();
+      coreThreads=m.threads||1;coreReady=true;coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;updateConvert();
     }else if(m.type==='progress'){
       progressWrap.classList.remove('hidden');
       if(m.total>0)progress.style.width=Math.min(100,m.frame/m.total*100)+'%';
-      coreStatus.textContent=m.total>0?`Encoding frame ${m.frame}/${m.total}`:`Encoding frame ${m.frame}`;
+      coreStatus.textContent=m.total>0?`Encoding frame ${m.frame}/${m.total} · ${coreThreads} threads`:`Encoding frame ${m.frame} · ${coreThreads} threads`;
     }else if(m.type==='done'){
-      busy=false;coreStatus.textContent='Decoder ready';progress.style.width='100%';
+      busy=false;coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;progress.style.width='100%';
       const blob=new Blob([m.data],{type:'video/webm'});
       if(outputURL)URL.revokeObjectURL(outputURL);
-      outputURL=URL.createObjectURL(blob);preview.src=outputURL;preview.load();preview.play().catch(()=>{});
+      outputURL=URL.createObjectURL(blob);preview.src=outputURL;preview.load();
       download.href=outputURL;download.download=(selected?.name||'video').replace(/\.bk2$/i,'')+'.webm';download.classList.remove('disabled');
-      outInfo.textContent=`${formatBytes(blob.size)} · ${m.frames} frames`;result.classList.remove('hidden');updateConvert();
+      const audio=selectedHeader?.tracks?` · ${selectedHeader.tracks} Opus audio track${selectedHeader.tracks===1?'':'s'}`:' · no audio';
+      outInfo.textContent=`${formatBytes(blob.size)} · ${m.frames} frames${audio} · ${m.threads||coreThreads} threads`;result.classList.remove('hidden');updateConvert();
     }else if(m.type==='error'){
-      busy=false;coreStatus.textContent=coreReady?'Decoder ready':'Decoder error';showError(m.message||'Conversion failed');updateConvert();
+      busy=false;coreStatus.textContent=coreReady?`Decoder ready · ${coreThreads} threads`:'Decoder error';showError(m.message||'Conversion failed');updateConvert();
     }else if(m.type==='log'){
       log.textContent+=(m.text||'')+'\n';log.scrollTop=log.scrollHeight;
     }
@@ -110,8 +118,8 @@
   async function chooseFile(f){
     clearError();result.classList.add('hidden');progressWrap.classList.add('hidden');progress.style.width='0';
     if(!f)return;
-    try{const head=await f.slice(0,64).arrayBuffer(),h=parseBK2(head);selected=f;renderMeta(f,h);updateConvert()}
-    catch(e){selected=null;meta.classList.add('hidden');showError(e.message);updateConvert()}
+    try{const head=await f.slice(0,64).arrayBuffer(),h=parseBK2(head);selected=f;selectedHeader=h;renderMeta(f,h);updateConvert()}
+    catch(e){selected=null;selectedHeader=null;meta.classList.add('hidden');showError(e.message);updateConvert()}
   }
   fileInput.addEventListener('change',()=>chooseFile(fileInput.files[0]));
   for(const ev of ['dragenter','dragover'])drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')});
@@ -120,8 +128,8 @@
   convert.addEventListener('click',async()=>{
     if(!selected||!coreReady||busy)return;
     busy=true;clearError();result.classList.add('hidden');download.classList.add('disabled');progressWrap.classList.remove('hidden');progress.style.width='0';coreStatus.textContent='Reading input…';updateConvert();
-    try{const data=await selected.arrayBuffer();worker.postMessage({type:'convert',data,crf:Number($('crf').value),cpuUsed:Number($('cpu').value)},[data])}
-    catch(e){busy=false;showError(e.message);coreStatus.textContent='Decoder ready';updateConvert()}
+    try{const data=await selected.arrayBuffer();worker.postMessage({type:'convert',data,crf:Number($('crf').value),cpuUsed:Number($('cpu').value),threads:coreThreads},[data])}
+    catch(e){busy=false;showError(e.message);coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;updateConvert()}
   });
 })();
 </script>
