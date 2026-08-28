@@ -4,14 +4,45 @@ let converting = false;
 
 const workerStartedAt = performance.now();
 const hardwareThreads = Math.max(1, Math.min(16, self.navigator?.hardwareConcurrency || 4));
+const pendingLogs = [];
+let pendingLogChars = 0;
+let logFlushTimer = null;
 
 function send(type, payload = {}, transfer = []) {
   self.postMessage({ type, ...payload }, transfer);
 }
 
+function flushLogs() {
+  if (logFlushTimer) {
+    clearTimeout(logFlushTimer);
+    logFlushTimer = null;
+  }
+  if (!pendingLogs.length) return;
+  const text = pendingLogs.join('\n');
+  pendingLogs.length = 0;
+  pendingLogChars = 0;
+  send('log', { text });
+}
+
+function queueLog(text) {
+  const value = String(text || '');
+  if (!value) return;
+  pendingLogs.push(value);
+  pendingLogChars += value.length + 1;
+
+  // FFmpeg can emit thousands of messages in a burst. Posting every line
+  // separately makes the main thread repeatedly rebuild the diagnostics <pre>
+  // and can make conversion look frozen even while the WASM worker is active.
+  if (pendingLogs.length >= 128 || pendingLogChars >= 24 * 1024) {
+    flushLogs();
+  } else if (!logFlushTimer) {
+    logFlushTimer = setTimeout(flushLogs, 100);
+  }
+}
+
 function trace(text) {
   const elapsed = ((performance.now() - workerStartedAt) / 1000).toFixed(3);
-  send('log', { text: `[worker +${elapsed}s] ${text}` });
+  queueLog(`[worker +${elapsed}s] ${text}`);
 }
 
 function getWorkerFS(module) {
@@ -38,10 +69,12 @@ async function init() {
         printErr(text) { trace(`[stderr] ${text}`); }
       });
       trace(`Emscripten module ready; WORKERFS=${!!getWorkerFS(core)}; hardwareThreads=${hardwareThreads}`);
+      flushLogs();
       send('ready', { threads: hardwareThreads, workerfs: !!getWorkerFS(core) });
       return core;
     } catch (err) {
       trace(`Initialization failed: ${err?.stack || err?.message || String(err)}`);
+      flushLogs();
       send('error', { message: 'Could not load the Bink2 decoder: ' + (err?.message || String(err)) });
       throw err;
     }
@@ -67,7 +100,6 @@ async function stageBrowserFile(module, file, path, jobId) {
       const end = Math.min(size, loaded + CHUNK_SIZE);
       trace(`Reading input chunk ${chunkIndex}: ${loaded}-${end}`);
       const chunk = new Uint8Array(await file.slice(loaded, end).arrayBuffer());
-      trace(`Writing input chunk ${chunkIndex}: ${chunk.byteLength} bytes`);
       module.FS.write(stream, chunk, 0, chunk.byteLength, loaded);
       loaded = end;
       chunkIndex++;
@@ -124,7 +156,8 @@ async function convert(message) {
 
     trace(`Input ready at ${inputInfo.path}`);
     trace(`Calling transcode_bk2(input=${inputInfo.path}, output=${output}, crf=${crf}, cpuUsed=${cpuUsed}, threads=${threads}, alpha=${!!message.alpha}, audioTracks=${message.audioTracks || 0})`);
-    trace('FFmpeg AV_LOG_TRACE output begins below');
+    trace('Native/FFmpeg milestone logging begins below');
+    flushLogs();
 
     const frames = module.ccall(
       'transcode_bk2',
@@ -151,6 +184,7 @@ async function convert(message) {
       : bytes.slice().buffer;
 
     trace(`Posting completed job ${jobId} to UI`);
+    flushLogs();
     send('done', {
       jobId,
       data: result,
@@ -165,6 +199,7 @@ async function convert(message) {
     try { module.FS.unlink('/input.bk2'); } catch (_) {}
     converting = false;
     trace(`Conversion job ${jobId} finished/aborted`);
+    flushLogs();
   }
 }
 
@@ -176,6 +211,7 @@ self.onmessage = async event => {
     await convert(message);
   } catch (err) {
     trace(`Conversion exception: ${err?.stack || err?.message || String(err)}`);
+    flushLogs();
     send('error', { jobId: message.jobId ?? 0, message: err?.message || String(err) });
   }
 };
