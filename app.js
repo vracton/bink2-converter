@@ -23,7 +23,6 @@
     worker: null,
     workerReady: false,
     workerThreads: 1,
-    directFileAccess: false,
     phase: 'booting',
     jobId: 0,
     startedAt: 0,
@@ -193,6 +192,15 @@
     }, 250);
   }
 
+  function updateInputProgress(loaded, total) {
+    const fraction = total > 0 ? Math.min(1, loaded / total) : 0;
+    const pct = fraction * 5;
+    ui.progressBar.style.width = `${pct}%`;
+    ui.progressDetail.textContent = `Loading ${(fraction * 100).toFixed(fraction < 0.1 ? 1 : 0)}%`;
+    ui.progressTitle.textContent = fraction >= 1 ? 'Initializing codecs…' : 'Loading BK2…';
+    ui.frameValue.textContent = `0 / ${state.header?.frames || 0}`;
+  }
+
   function updateProgress(frame, total) {
     const now = performance.now();
     total = total || state.header?.frames || 0;
@@ -202,14 +210,16 @@
     }
     state.lastFrame = frame;
     state.lastFrameAt = now;
-    const pct = total > 0 ? Math.min(100, frame / total * 100) : 0;
+    const pct = total > 0 ? Math.min(100, 5 + (frame / total) * 95) : 5;
     ui.progressBar.style.width = `${pct}%`;
     ui.progressDetail.textContent = total ? `${pct.toFixed(pct < 10 ? 1 : 0)}%` : 'Working…';
     ui.frameValue.textContent = total ? `${frame.toLocaleString()} / ${total.toLocaleString()}` : frame.toLocaleString();
     ui.fpsValue.textContent = state.smoothedFps ? `${state.smoothedFps.toFixed(1)} fps` : '—';
     ui.etaValue.textContent = state.smoothedFps && total > frame ? formatDuration((total - frame) / state.smoothedFps) : '—';
-    ui.progressTitle.textContent = frame === 0 ? 'Preparing conversion…' : 'Encoding video…';
+    ui.progressTitle.textContent = frame === 0 ? 'Initializing codecs…' : 'Encoding video…';
   }
+
+  function workerPath() { return './bink2-worker.js'; }
 
   function destroyWorker() {
     if (state.worker) state.worker.terminate();
@@ -226,7 +236,7 @@
 
     let worker;
     try {
-      worker = new Worker('./bink2-worker.js');
+      worker = new Worker(workerPath());
     } catch (error) {
       state.phase = 'error';
       setEngine('error', 'Unavailable', 'The conversion worker could not start.');
@@ -239,29 +249,43 @@
     worker.onmessage = event => {
       const message = event.data || {};
       if (message.jobId != null && message.jobId !== state.jobId) return;
+
       switch (message.type) {
-        case 'ready':
+        case 'ready': {
           state.workerReady = true;
           state.workerThreads = message.threads || 1;
-          state.directFileAccess = !!message.workerfs;
           state.phase = state.file ? 'ready' : 'idle';
           setEngine('ready', 'Ready', `${state.workerThreads} worker thread${state.workerThreads === 1 ? '' : 's'} available`);
           ui.threadValue.textContent = String(state.workerThreads);
-          ui.workerFsValue.textContent = state.directFileAccess ? 'Enabled' : 'Fallback copy';
+          ui.workerFsValue.textContent = 'Chunked memory staging';
           updateControls();
           break;
+        }
         case 'input-mode':
-          ui.workerFsValue.textContent = message.mode === 'direct' ? 'Enabled' : 'Fallback copy';
-          ui.progressTitle.textContent = message.mode === 'direct' ? 'Opening BK2…' : 'Copying BK2 into decoder memory…';
+          ui.workerFsValue.textContent = message.mode === 'staged' ? 'Chunked memory staging' : 'Memory input';
+          ui.progressTitle.textContent = 'Loading BK2…';
           break;
-        case 'progress': updateProgress(message.frame || 0, message.total || state.header?.frames || 0); break;
-        case 'done': finishConversion(message); break;
-        case 'error': failConversion(message.message || 'Conversion failed.'); break;
-        case 'log': appendLog(message.text); break;
+        case 'input-progress':
+          updateInputProgress(message.loaded || 0, message.total || state.file?.size || 0);
+          break;
+        case 'progress':
+          updateProgress(message.frame || 0, message.total || state.header?.frames || 0);
+          break;
+        case 'done':
+          finishConversion(message);
+          break;
+        case 'error':
+          failConversion(message.message || 'Conversion failed.');
+          break;
+        case 'log':
+          appendLog(message.text);
+          break;
       }
     };
 
-    worker.onerror = event => failConversion(`Converter worker crashed: ${event.message || 'unknown worker error'}`);
+    worker.onerror = event => {
+      failConversion(`Converter worker crashed: ${event.message || 'unknown worker error'}`);
+    };
     updateControls();
   }
 
@@ -274,10 +298,10 @@
     state.jobId++;
     resetProgress();
     state.startedAt = performance.now();
-    state.lastFrameAt = state.startedAt;
+    state.lastFrameAt = 0;
     ui.idleActions.classList.add('hidden');
     ui.progressPanel.classList.remove('hidden');
-    ui.progressTitle.textContent = 'Opening BK2…';
+    ui.progressTitle.textContent = 'Loading BK2…';
     ui.progressDetail.textContent = '0%';
     setEngine('ready', 'Working', `${state.workerThreads} threads · conversion in progress`);
     updateControls();
@@ -285,9 +309,14 @@
 
     try {
       state.worker.postMessage({
-        type: 'convert', jobId: state.jobId, file: state.file,
-        crf: Number(ui.qualitySelect.value), cpuUsed: Number(ui.speedSelect.value),
-        threads: state.workerThreads, alpha: state.header.alpha, audioTracks: state.header.audioTracks
+        type: 'convert',
+        jobId: state.jobId,
+        file: state.file,
+        crf: Number(ui.qualitySelect.value),
+        cpuUsed: Number(ui.speedSelect.value),
+        threads: state.workerThreads,
+        alpha: state.header.alpha,
+        audioTracks: state.header.audioTracks
       });
     } catch (error) {
       failConversion(`Could not send the file to the converter: ${error?.message || error}`);
@@ -303,11 +332,20 @@
     if (state.phase !== 'converting') return;
     stopTimer();
     state.phase = 'done';
-    const blob = new Blob([message.data], { type: 'video/webm' });
+    const data = message.data;
+    const blob = new Blob([data], { type: 'video/webm' });
     state.outputUrl = URL.createObjectURL(blob);
     const elapsed = (performance.now() - state.startedAt) / 1000;
     const frames = message.frames || state.header?.frames || 0;
     const avgFps = elapsed > 0 ? frames / elapsed : 0;
+
+    ui.progressBar.style.width = '100%';
+    ui.progressDetail.textContent = '100%';
+    ui.elapsedValue.textContent = formatDuration(elapsed);
+    ui.fpsValue.textContent = avgFps ? `${avgFps.toFixed(1)} fps` : '—';
+    ui.etaValue.textContent = 'Done';
+    ui.frameValue.textContent = `${frames.toLocaleString()} / ${frames.toLocaleString()}`;
+    ui.progressTitle.textContent = 'Conversion complete';
 
     const base = (state.file?.name || 'converted').replace(/\.bk2$/i, '');
     ui.downloadButton.href = state.outputUrl;
@@ -315,8 +353,13 @@
     ui.previewVideo.src = state.outputUrl;
     ui.previewVideo.load();
     ui.previewStage.classList.toggle('alpha', !!state.header?.alpha);
-    ui.previewNote.textContent = state.header?.alpha ? 'Checkerboard indicates transparent areas.' : 'Previewing the converted WebM locally.';
-    const audioLabel = state.header?.audioTracks ? `${state.header.audioTracks} audio stream${state.header.audioTracks === 1 ? '' : 's'} → Opus` : 'No audio';
+    ui.previewNote.textContent = state.header?.alpha
+      ? 'Checkerboard indicates transparent areas.'
+      : 'Previewing the converted WebM locally.';
+
+    const audioLabel = state.header?.audioTracks
+      ? `${state.header.audioTracks} audio stream${state.header.audioTracks === 1 ? '' : 's'} → Opus`
+      : 'No audio';
     ui.resultTitle.textContent = `${base}.webm`;
     ui.resultMeta.textContent = `${formatBytes(blob.size)} · ${frames.toLocaleString()} frames · ${avgFps.toFixed(1)} fps conversion · ${audioLabel}`;
     ui.resultCard.classList.remove('hidden');
@@ -329,6 +372,7 @@
 
   function failConversion(message) {
     stopTimer();
+    if (state.phase !== 'converting' && state.phase !== 'error') return;
     state.phase = 'ready';
     ui.progressPanel.classList.add('hidden');
     ui.idleActions.classList.remove('hidden');
@@ -358,7 +402,10 @@
   ui.browseButton.addEventListener('click', chooseFileDialog);
   ui.replaceButton.addEventListener('click', chooseFileDialog);
   ui.dropZone.addEventListener('keydown', event => {
-    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); chooseFileDialog(event); }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      chooseFileDialog(event);
+    }
   });
   ui.fileInput.addEventListener('change', () => {
     const file = ui.fileInput.files?.[0];
