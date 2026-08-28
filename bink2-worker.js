@@ -1,230 +1,141 @@
-let core = null;
-let initializing = null;
-let converting = false;
+let core=null,initializing=null,converting=false;
+const started=performance.now();
+const hardwareThreads=Math.max(1,Math.min(8,self.navigator?.hardwareConcurrency||4));
+function send(type,payload={},transfer=[]){self.postMessage({type,...payload},transfer)}
+function stamp(){return `[worker +${((performance.now()-started)/1000).toFixed(3)}s]`}
+function log(text){send('log',{text:`${stamp()} ${text}`})}
+function nativeLog(channel,text){if(text)send('log',{text:`${stamp()} [${channel}] ${text}`})}
+function ext(file){return /\.bik$/i.test(file?.name||'')?'.bik':'.bk2'}
+function hasOpfs(){return !!self.navigator?.storage?.getDirectory}
 
-const workerStartedAt = performance.now();
-const hardwareThreads = Math.max(1, Math.min(8, self.navigator?.hardwareConcurrency || 4));
-const pendingLogs = [];
-let pendingLogChars = 0;
-let logFlushTimer = null;
-
-function send(type, payload = {}, transfer = []) {
-  self.postMessage({ type, ...payload }, transfer);
-}
-
-function elapsedPrefix() {
-  return `[worker +${((performance.now() - workerStartedAt) / 1000).toFixed(3)}s]`;
-}
-
-function flushLogs() {
-  if (logFlushTimer) {
-    clearTimeout(logFlushTimer);
-    logFlushTimer = null;
-  }
-  if (!pendingLogs.length) return;
-  const text = pendingLogs.join('\n');
-  pendingLogs.length = 0;
-  pendingLogChars = 0;
-  send('log', { text });
-}
-
-function queueLog(text) {
-  const value = String(text || '');
-  if (!value) return;
-  pendingLogs.push(value);
-  pendingLogChars += value.length + 1;
-
-  if (pendingLogs.length >= 128 || pendingLogChars >= 24 * 1024) {
-    flushLogs();
-  } else if (!logFlushTimer) {
-    logFlushTimer = setTimeout(flushLogs, 100);
-  }
-}
-
-function trace(text) {
-  queueLog(`${elapsedPrefix()} ${text}`);
-}
-
-// Native WASM calls are synchronous. A setTimeout-based log batch cannot flush
-// until ccall() returns, which hid every C/FFmpeg checkpoint while conversion
-// was running. Native stdout/stderr therefore bypasses the batch queue.
-function nativeLog(channel, text) {
-  const value = String(text || '');
-  if (!value) return;
-  flushLogs();
-  send('log', { text: `${elapsedPrefix()} [${channel}] ${value}` });
-}
-
-function getWorkerFS(module) {
-  return module?.WORKERFS || module?.FS?.filesystems?.WORKERFS || null;
-}
-
-async function init() {
-  if (core) return core;
-  if (initializing) return initializing;
-  initializing = (async () => {
-    try {
-      trace('Importing ./core/bink2-core.js');
-      importScripts('./core/bink2-core.js');
-      trace('WASM loader script imported');
-      if (typeof createBink2Core !== 'function') throw new Error('Bink2 WASM loader did not define createBink2Core().');
-      trace('Instantiating Emscripten module');
-      core = await createBink2Core({
-        locateFile(path) {
-          const url = new URL('./core/' + path, self.location.href).href;
-          trace(`locateFile ${path} -> ${url}`);
-          return url;
-        },
-        print(text) { nativeLog('stdout', text); },
-        printErr(text) { nativeLog('stderr', text); }
-      });
-      trace(`Emscripten module ready; WORKERFS=${!!getWorkerFS(core)}; hardwareThreads=${hardwareThreads}`);
-      flushLogs();
-      send('ready', { threads: hardwareThreads, workerfs: !!getWorkerFS(core) });
-      return core;
-    } catch (err) {
-      trace(`Initialization failed: ${err?.stack || err?.message || String(err)}`);
-      flushLogs();
-      send('error', { message: 'Could not load the Bink2 decoder: ' + (err?.message || String(err)) });
-      throw err;
-    }
-  })();
+async function init(){
+  if(core)return core;
+  if(initializing)return initializing;
+  initializing=(async()=>{
+    log('Importing WASM core');
+    importScripts('./core/bink2-core.js');
+    if(typeof createBink2Core!=='function')throw new Error('Bink WASM loader is missing.');
+    core=await createBink2Core({
+      locateFile:path=>new URL('./core/'+path,self.location.href).href,
+      print:text=>nativeLog('stdout',text),
+      printErr:text=>nativeLog('stderr',text)
+    });
+    log(`WASM ready; OPFS=${hasOpfs()}; threads=${hardwareThreads}`);
+    send('ready',{threads:hardwareThreads,opfs:hasOpfs()});
+    return core;
+  })().catch(err=>{send('error',{message:'Could not load the Bink decoder: '+(err?.message||err)});throw err});
   return initializing;
 }
 
-async function stageBrowserFile(module, file, path, jobId) {
-  const CHUNK_SIZE = 16 * 1024 * 1024;
-  const size = file.size;
-  trace(`Staging browser File into MEMFS: name=${file.name} size=${size} bytes chunkSize=${CHUNK_SIZE}`);
+function writeAll(handle,bytes,offset){
+  let done=0;
+  while(done<bytes.byteLength){
+    const n=handle.write(bytes.subarray(done),{at:offset+done});
+    if(!(n>0))throw new Error('OPFS write returned zero bytes.');
+    done+=n;
+  }
+}
 
-  module.FS.writeFile(path, new Uint8Array(0));
-  trace(`Created ${path}`);
-  module.FS.truncate(path, size);
-  trace(`Preallocated ${path} to ${size} bytes`);
-  const stream = module.FS.open(path, 'r+');
-  trace(`Opened ${path} for chunked writes`);
-  try {
-    let loaded = 0;
-    let chunkIndex = 0;
-    while (loaded < size) {
-      const end = Math.min(size, loaded + CHUNK_SIZE);
-      trace(`Reading input chunk ${chunkIndex}: ${loaded}-${end}`);
-      const chunk = new Uint8Array(await file.slice(loaded, end).arrayBuffer());
-      module.FS.write(stream, chunk, 0, chunk.byteLength, loaded);
-      loaded = end;
-      chunkIndex++;
-      send('input-progress', { jobId, loaded, total: size });
-      trace(`Input staged: ${loaded}/${size} bytes`);
+async function prepareOpfs(module,file,jobId){
+  if(!hasOpfs())throw new Error('OPFS unavailable');
+  const root=await navigator.storage.getDirectory();
+  const dir=await root.getDirectoryHandle('bink2-converter',{create:true});
+  const inputHandle=await dir.getFileHandle('current-input.bink',{create:true});
+  const outputHandle=await dir.getFileHandle('current-output.webm',{create:true});
+  if(typeof inputHandle.createSyncAccessHandle!=='function')throw new Error('Synchronous OPFS unavailable');
+  const inputAccess=await inputHandle.createSyncAccessHandle();
+  let outputAccess;
+  try{
+    inputAccess.truncate(0);
+    const chunkSize=16*1024*1024;
+    for(let loaded=0;loaded<file.size;){
+      const end=Math.min(file.size,loaded+chunkSize);
+      const chunk=new Uint8Array(await file.slice(loaded,end).arrayBuffer());
+      writeAll(inputAccess,chunk,loaded);
+      loaded=end;
+      send('input-progress',{jobId,loaded,total:file.size});
     }
-  } finally {
-    module.FS.close(stream);
-    trace(`Closed staged input file ${path}`);
+    inputAccess.flush();
+    outputAccess=await outputHandle.createSyncAccessHandle();
+    outputAccess.truncate(0);
+    module.bink2OpfsInputHandle=inputAccess;
+    module.bink2OpfsOutputHandle=outputAccess;
+    module.bink2OpfsError='';
+    send('input-mode',{jobId,mode:'opfs'});
+    log(`OPFS input ready: ${inputAccess.getSize()} bytes; source is outside WASM heap`);
+    return{mode:'opfs',path:`opfs-input${ext(file)}`,inputAccess,outputAccess,outputHandle};
+  }catch(err){
+    try{outputAccess?.close()}catch(_){}
+    try{inputAccess.close()}catch(_){}
+    module.bink2OpfsInputHandle=null;module.bink2OpfsOutputHandle=null;
+    throw err;
   }
 }
 
-async function prepareInput(module, message, jobId) {
-  const copiedInput = '/input.bk2';
-
-  if (message.file) {
-    trace('Input mode: browser File -> chunked MEMFS staging');
-    send('input-mode', { jobId, mode: 'staged' });
-    await stageBrowserFile(module, message.file, copiedInput, jobId);
-    return { path: copiedInput };
-  }
-
-  if (message.data) {
-    trace(`Input mode: ArrayBuffer -> MEMFS (${message.data.byteLength} bytes)`);
-    send('input-mode', { jobId, mode: 'memory' });
-    module.FS.writeFile(copiedInput, new Uint8Array(message.data));
-    send('input-progress', { jobId, loaded: message.data.byteLength, total: message.data.byteLength });
-    trace('ArrayBuffer input written to MEMFS');
-    return { path: copiedInput };
-  }
-
-  throw new Error('No BK2 input was provided.');
-}
-
-async function convert(message) {
-  if (converting) throw new Error('A conversion is already running.');
-  converting = true;
-  const jobId = message.jobId ?? 0;
-  trace(`Conversion job ${jobId} accepted`);
-  const module = await init();
-  const output = '/output.webm';
-  let inputInfo = null;
-
-  try {
-    trace('Cleaning stale MEMFS input/output files');
-    try { module.FS.unlink('/input.bk2'); } catch (_) {}
-    try { module.FS.unlink(output); } catch (_) {}
-    inputInfo = await prepareInput(module, message, jobId);
-
-    const crf = Number.isFinite(message.crf) ? message.crf : 18;
-    const cpuUsed = Number.isFinite(message.cpuUsed) ? message.cpuUsed : 8;
-    const threads = Math.max(1, Math.min(hardwareThreads,
-      Number.isFinite(message.threads) ? message.threads : hardwareThreads));
-
-    trace(`Input ready at ${inputInfo.path}`);
-    trace(`Calling transcode_bk2(input=${inputInfo.path}, output=${output}, crf=${crf}, cpuUsed=${cpuUsed}, threads=${threads}, alpha=${!!message.alpha}, audioTracks=${message.audioTracks || 0})`);
-    trace('Native/FFmpeg milestone logging begins below');
-    flushLogs();
-
-    const frames = module.ccall(
-      'transcode_bk2',
-      'number',
-      ['string', 'string', 'number', 'number', 'number'],
-      [inputInfo.path, output, crf, cpuUsed, threads]
-    );
-
-    trace(`transcode_bk2 returned ${frames}`);
-
-    if (frames < 0) {
-      const ptr = module._bink2_last_error();
-      const reason = ptr ? module.UTF8ToString(ptr) : 'Unknown decoder error';
-      trace(`Native error: ${reason}`);
-      throw new Error(reason || 'Bink2 conversion failed.');
+async function prepareMemfs(module,file,jobId){
+  const path=`/input${ext(file)}`,chunkSize=16*1024*1024;
+  module.FS.writeFile(path,new Uint8Array(0));
+  module.FS.truncate(path,file.size);
+  const stream=module.FS.open(path,'r+');
+  try{
+    for(let loaded=0;loaded<file.size;){
+      const end=Math.min(file.size,loaded+chunkSize);
+      const chunk=new Uint8Array(await file.slice(loaded,end).arrayBuffer());
+      module.FS.write(stream,chunk,0,chunk.byteLength,loaded);
+      loaded=end;send('input-progress',{jobId,loaded,total:file.size});
     }
+  }finally{module.FS.close(stream)}
+  send('input-mode',{jobId,mode:'staged'});
+  return{mode:'memfs',path};
+}
 
-    trace(`Reading completed WebM from ${output}`);
-    const bytes = module.FS.readFile(output);
-    trace(`WebM read from MEMFS: ${bytes.byteLength} bytes`);
-    const shared = typeof SharedArrayBuffer !== 'undefined' && bytes.buffer instanceof SharedArrayBuffer;
-    const result = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength && !shared
-      ? bytes.buffer
-      : bytes.slice().buffer;
+function closeOpfs(module,info){
+  if(info?.mode!=='opfs')return;
+  try{info.outputAccess?.flush()}catch(_){}
+  try{info.outputAccess?.close()}catch(_){}
+  try{info.inputAccess?.close()}catch(_){}
+  module.bink2OpfsInputHandle=null;module.bink2OpfsOutputHandle=null;
+}
 
-    trace(`Posting completed job ${jobId} to UI`);
-    flushLogs();
-    send('done', {
-      jobId,
-      data: result,
-      frames,
-      threads,
-      codec: 'VP9',
-      audioTracks: message.audioTracks || 0
-    }, [result]);
-  } finally {
-    trace(`Cleaning job ${jobId} files`);
-    try { module.FS.unlink(output); } catch (_) {}
-    try { module.FS.unlink('/input.bk2'); } catch (_) {}
-    converting = false;
-    trace(`Conversion job ${jobId} finished/aborted`);
-    flushLogs();
+async function convert(message){
+  if(converting)throw new Error('A conversion is already running.');
+  converting=true;
+  const module=await init(),jobId=message.jobId??0,output='/output.webm';
+  let info=null;
+  try{
+    try{module.FS.unlink('/input.bk2')}catch(_){}try{module.FS.unlink('/input.bik')}catch(_){}try{module.FS.unlink(output)}catch(_){}
+    if(!message.file)throw new Error('No Bink input was provided.');
+    try{info=await prepareOpfs(module,message.file,jobId)}catch(err){log(`OPFS fallback: ${err?.message||err}`);info=await prepareMemfs(module,message.file,jobId)}
+    const crf=Number.isFinite(message.crf)?message.crf:18;
+    const cpuUsed=Number.isFinite(message.cpuUsed)?message.cpuUsed:8;
+    const threads=Math.max(1,Math.min(hardwareThreads,Number.isFinite(message.threads)?message.threads:hardwareThreads));
+    log(`Starting ${info.mode.toUpperCase()} transcode: ${info.path}, threads=${threads}`);
+    const frames=module.ccall('transcode_bk2','number',['string','string','number','number','number'],[info.path,output,crf,cpuUsed,threads]);
+    if(frames<0){
+      const ptr=module._bink2_last_error();
+      let reason=ptr?module.UTF8ToString(ptr):'Unknown decoder error';
+      if(module.bink2OpfsError)reason+=` (${module.bink2OpfsError})`;
+      throw new Error(reason);
+    }
+    if(info.mode==='opfs'){
+      info.outputAccess.flush();
+      const size=info.outputAccess.getSize();
+      closeOpfs(module,info);
+      const file=await info.outputHandle.getFile();
+      info=null;
+      log(`OPFS output complete: ${size} bytes; no WebM accumulated in WASM`);
+      send('done',{jobId,file,frames,threads,codec:'VP9',audioTracks:message.audioTracks||0,outputMode:'opfs'});
+    }else{
+      const bytes=module.FS.readFile(output),shared=typeof SharedArrayBuffer!=='undefined'&&bytes.buffer instanceof SharedArrayBuffer;
+      const data=bytes.byteOffset===0&&bytes.byteLength===bytes.buffer.byteLength&&!shared?bytes.buffer:bytes.slice().buffer;
+      send('done',{jobId,data,frames,threads,codec:'VP9',audioTracks:message.audioTracks||0,outputMode:'memfs'},[data]);
+    }
+  }finally{
+    closeOpfs(module,info);
+    try{module.FS.unlink(output)}catch(_){}try{module.FS.unlink('/input.bk2')}catch(_){}try{module.FS.unlink('/input.bik')}catch(_){}
+    converting=false;
   }
 }
 
-self.onmessage = async event => {
-  const message = event.data || {};
-  if (message.type !== 'convert') return;
-  trace(`Received message type=${message.type} jobId=${message.jobId ?? 0}`);
-  try {
-    await convert(message);
-  } catch (err) {
-    trace(`Conversion exception: ${err?.stack || err?.message || String(err)}`);
-    flushLogs();
-    send('error', { jobId: message.jobId ?? 0, message: err?.message || String(err) });
-  }
-};
-
-trace('Worker script loaded');
-init().catch(() => {});
+self.onmessage=async event=>{const m=event.data||{};if(m.type!=='convert')return;try{await convert(m)}catch(err){log(`Conversion error: ${err?.message||err}`);send('error',{jobId:m.jobId??0,message:err?.message||String(err)})}};
+log('Worker script loaded');init().catch(()=>{});
