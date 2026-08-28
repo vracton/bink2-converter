@@ -2,8 +2,16 @@
 #define BINK2_NATIVE_CHECKPOINTS_H
 
 #include <stdio.h>
+#include <string.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/audio_fifo.h>
+#include <libavutil/frame.h>
+#include <libswresample/swresample.h>
+
+static inline const char *b2_codec_name(const AVCodecContext *ctx) {
+    return (ctx && ctx->codec && ctx->codec->name) ? ctx->codec->name : "unknown";
+}
 
 static inline void b2_checkpoint(const char *phase, const char *name) {
     fprintf(stderr, "[bink2-native] %s %s\n", phase, name);
@@ -48,6 +56,19 @@ static inline int b2_av_find_best_stream(AVFormatContext *ic,
 static inline int b2_avcodec_open2(AVCodecContext *avctx, const AVCodec *codec,
                                    AVDictionary **options) {
     const char *name = codec && codec->name ? codec->name : "unknown";
+
+    /* Keep the expensive VP9 encoder multithreaded, but do not let the Bink2
+       decoder reserve another full FFmpeg thread pool. In a browser the
+       Emscripten pthread pool is finite; opening both decoder=8 and VP9=8 can
+       exhaust the pre-created workers and deadlock when the first frame is
+       actually dispatched. Bink decode is cheap relative to 4K VP9 encode. */
+    if (avctx && strcmp(name, "binkvideo2") == 0 && avctx->thread_count > 1) {
+        fprintf(stderr,
+                "[bink2-native] limiting binkvideo2 decoder threads %d -> 1 to preserve browser pthread pool\n",
+                avctx->thread_count);
+        avctx->thread_count = 1;
+    }
+
     fprintf(stderr, "[bink2-native] BEFORE avcodec_open2 codec=%s threads=%d\n",
             name, avctx ? avctx->thread_count : -1);
     fflush(stderr);
@@ -100,6 +121,195 @@ static inline int b2_avformat_write_header(AVFormatContext *s,
     return ret;
 }
 
+static inline int b2_av_read_frame(AVFormatContext *s, AVPacket *pkt) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 20) {
+        fprintf(stderr, "[bink2-packet] BEFORE av_read_frame #%d\n", n);
+        fflush(stderr);
+    }
+    int ret = av_read_frame(s, pkt);
+    if (n <= 20) {
+        if (ret >= 0 && pkt) {
+            fprintf(stderr,
+                    "[bink2-packet] AFTER av_read_frame #%d ret=%d stream=%d size=%d pts=%lld\n",
+                    n, ret, pkt->stream_index, pkt->size, (long long)pkt->pts);
+        } else {
+            fprintf(stderr, "[bink2-packet] AFTER av_read_frame #%d ret=%d\n", n, ret);
+        }
+        fflush(stderr);
+    }
+    return ret;
+}
+
+static inline int b2_avcodec_send_packet(AVCodecContext *ctx, const AVPacket *pkt) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 24) {
+        fprintf(stderr,
+                "[bink2-packet] BEFORE avcodec_send_packet #%d codec=%s size=%d stream=%d\n",
+                n, b2_codec_name(ctx), pkt ? pkt->size : -1,
+                pkt ? pkt->stream_index : -1);
+        fflush(stderr);
+    }
+    int ret = avcodec_send_packet(ctx, pkt);
+    if (n <= 24) {
+        fprintf(stderr,
+                "[bink2-packet] AFTER avcodec_send_packet #%d codec=%s ret=%d\n",
+                n, b2_codec_name(ctx), ret);
+        fflush(stderr);
+    }
+    return ret;
+}
+
+static inline int b2_avcodec_receive_frame(AVCodecContext *ctx, AVFrame *frame) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 24) {
+        fprintf(stderr, "[bink2-packet] BEFORE avcodec_receive_frame #%d codec=%s\n",
+                n, b2_codec_name(ctx));
+        fflush(stderr);
+    }
+    int ret = avcodec_receive_frame(ctx, frame);
+    if (n <= 24) {
+        fprintf(stderr,
+                "[bink2-packet] AFTER avcodec_receive_frame #%d codec=%s ret=%d samples=%d format=%d\n",
+                n, b2_codec_name(ctx), ret,
+                (ret >= 0 && frame) ? frame->nb_samples : -1,
+                (ret >= 0 && frame) ? frame->format : -1);
+        fflush(stderr);
+    }
+    return ret;
+}
+
+static inline int b2_av_frame_get_buffer(AVFrame *frame, int align) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 16) {
+        fprintf(stderr,
+                "[bink2-audio] BEFORE av_frame_get_buffer #%d samples=%d format=%d\n",
+                n, frame ? frame->nb_samples : -1, frame ? frame->format : -1);
+        fflush(stderr);
+    }
+    int ret = av_frame_get_buffer(frame, align);
+    if (n <= 16) {
+        fprintf(stderr, "[bink2-audio] AFTER av_frame_get_buffer #%d ret=%d\n", n, ret);
+        fflush(stderr);
+    }
+    return ret;
+}
+
+static inline int b2_swr_convert(struct SwrContext *s, uint8_t **out,
+                                 int out_count, const uint8_t **in,
+                                 int in_count) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 16) {
+        fprintf(stderr,
+                "[bink2-audio] BEFORE swr_convert #%d in=%d out_capacity=%d\n",
+                n, in_count, out_count);
+        fflush(stderr);
+    }
+    int ret = swr_convert(s, out, out_count, in, in_count);
+    if (n <= 16) {
+        fprintf(stderr, "[bink2-audio] AFTER swr_convert #%d ret=%d\n", n, ret);
+        fflush(stderr);
+    }
+    return ret;
+}
+
+static inline int b2_av_audio_fifo_realloc(AVAudioFifo *af, int nb_samples) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 16) {
+        fprintf(stderr, "[bink2-audio] BEFORE fifo_realloc #%d samples=%d\n",
+                n, nb_samples);
+        fflush(stderr);
+    }
+    int ret = av_audio_fifo_realloc(af, nb_samples);
+    if (n <= 16) {
+        fprintf(stderr, "[bink2-audio] AFTER fifo_realloc #%d ret=%d\n", n, ret);
+        fflush(stderr);
+    }
+    return ret;
+}
+
+static inline int b2_av_audio_fifo_write(AVAudioFifo *af, void **data,
+                                         int nb_samples) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 16) {
+        fprintf(stderr, "[bink2-audio] BEFORE fifo_write #%d samples=%d\n",
+                n, nb_samples);
+        fflush(stderr);
+    }
+    int ret = av_audio_fifo_write(af, data, nb_samples);
+    if (n <= 16) {
+        fprintf(stderr, "[bink2-audio] AFTER fifo_write #%d ret=%d\n", n, ret);
+        fflush(stderr);
+    }
+    return ret;
+}
+
+static inline int b2_avcodec_send_frame(AVCodecContext *ctx, const AVFrame *frame) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 20) {
+        fprintf(stderr,
+                "[bink2-encode] BEFORE avcodec_send_frame #%d codec=%s pts=%lld samples=%d\n",
+                n, b2_codec_name(ctx),
+                frame ? (long long)frame->pts : -1LL,
+                frame ? frame->nb_samples : -1);
+        fflush(stderr);
+    }
+    int ret = avcodec_send_frame(ctx, frame);
+    if (n <= 20) {
+        fprintf(stderr,
+                "[bink2-encode] AFTER avcodec_send_frame #%d codec=%s ret=%d\n",
+                n, b2_codec_name(ctx), ret);
+        fflush(stderr);
+    }
+    return ret;
+}
+
+static inline int b2_avcodec_receive_packet(AVCodecContext *ctx, AVPacket *pkt) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 20) {
+        fprintf(stderr, "[bink2-encode] BEFORE avcodec_receive_packet #%d codec=%s\n",
+                n, b2_codec_name(ctx));
+        fflush(stderr);
+    }
+    int ret = avcodec_receive_packet(ctx, pkt);
+    if (n <= 20) {
+        fprintf(stderr,
+                "[bink2-encode] AFTER avcodec_receive_packet #%d codec=%s ret=%d size=%d\n",
+                n, b2_codec_name(ctx), ret,
+                (ret >= 0 && pkt) ? pkt->size : -1);
+        fflush(stderr);
+    }
+    return ret;
+}
+
+static inline int b2_av_interleaved_write_frame(AVFormatContext *s, AVPacket *pkt) {
+    static int calls = 0;
+    int n = ++calls;
+    if (n <= 20) {
+        fprintf(stderr,
+                "[bink2-mux] BEFORE av_interleaved_write_frame #%d stream=%d size=%d pts=%lld\n",
+                n, pkt ? pkt->stream_index : -1, pkt ? pkt->size : -1,
+                pkt ? (long long)pkt->pts : -1LL);
+        fflush(stderr);
+    }
+    int ret = av_interleaved_write_frame(s, pkt);
+    if (n <= 20) {
+        fprintf(stderr, "[bink2-mux] AFTER av_interleaved_write_frame #%d ret=%d\n",
+                n, ret);
+        fflush(stderr);
+    }
+    return ret;
+}
+
 #define avformat_open_input             b2_avformat_open_input
 #define avformat_find_stream_info       b2_avformat_find_stream_info
 #define av_find_best_stream             b2_av_find_best_stream
@@ -108,5 +318,15 @@ static inline int b2_avformat_write_header(AVFormatContext *s,
 #define avformat_new_stream             b2_avformat_new_stream
 #define avio_open                       b2_avio_open
 #define avformat_write_header           b2_avformat_write_header
+#define av_read_frame                   b2_av_read_frame
+#define avcodec_send_packet             b2_avcodec_send_packet
+#define avcodec_receive_frame           b2_avcodec_receive_frame
+#define av_frame_get_buffer             b2_av_frame_get_buffer
+#define swr_convert                     b2_swr_convert
+#define av_audio_fifo_realloc           b2_av_audio_fifo_realloc
+#define av_audio_fifo_write             b2_av_audio_fifo_write
+#define avcodec_send_frame              b2_avcodec_send_frame
+#define avcodec_receive_packet          b2_avcodec_receive_packet
+#define av_interleaved_write_frame      b2_av_interleaved_write_frame
 
 #endif
