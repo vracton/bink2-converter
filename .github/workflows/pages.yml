@@ -52,7 +52,7 @@ jobs:
           sed -i 's/c->has_alpha = c->flags & BINK_FLAG_ALPHA;/c->has_alpha = !!(c->flags \& BINK_FLAG_ALPHA);/' libavcodec/bink2.c
           grep -F 'c->has_alpha = !!(c->flags & BINK_FLAG_ALPHA);' libavcodec/bink2.c
 
-      - name: Build multithreaded libvpx VP9 encoder for WASM
+      - name: Build multithreaded libvpx VP8/VP9 encoders for WASM
         run: |
           git clone --depth 1 --branch v1.16.0 https://chromium.googlesource.com/webm/libvpx libvpx
           mkdir -p "$PREFIX"
@@ -67,7 +67,9 @@ jobs:
             --disable-tools \
             --disable-docs \
             --disable-unit-tests \
-            --disable-vp8 \
+            --enable-vp8 \
+            --enable-vp8-encoder \
+            --disable-vp8-decoder \
             --enable-vp9 \
             --enable-vp9-encoder \
             --disable-vp9-decoder \
@@ -122,7 +124,7 @@ jobs:
             --enable-decoder=binkvideo,bink2,binkaudio_dct,binkaudio_rdft \
             --enable-demuxer=bink \
             --enable-muxer=webm \
-            --enable-encoder=libvpx_vp9,libopus \
+            --enable-encoder=libvpx_vp8,libvpx_vp9,libopus \
             --enable-bsf=vp9_superframe \
             --enable-protocol=file \
             --enable-libvpx \
@@ -137,7 +139,7 @@ jobs:
             --extra-cflags="-O3 -msimd128 -pthread -I$PREFIX/include -I$PREFIX/include/opus" \
             --extra-ldflags="-O3 -msimd128 -pthread -L$PREFIX/lib" \
             --extra-libs='-lvpx -lopus -lm'
-          grep -E 'CONFIG_BINKVIDEO_DECODER=yes|CONFIG_BINK2_DECODER=yes|CONFIG_LIBVPX_VP9_ENCODER=yes|CONFIG_LIBOPUS_ENCODER=yes|CONFIG_BINK_DEMUXER=yes|CONFIG_WEBM_MUXER=yes|CONFIG_VP9_SUPERFRAME_BSF=yes|CONFIG_SWRESAMPLE=yes' ffbuild/config.mak
+          grep -E 'CONFIG_BINKVIDEO_DECODER=yes|CONFIG_BINK2_DECODER=yes|CONFIG_LIBVPX_VP8_ENCODER=yes|CONFIG_LIBVPX_VP9_ENCODER=yes|CONFIG_LIBOPUS_ENCODER=yes|CONFIG_BINK_DEMUXER=yes|CONFIG_WEBM_MUXER=yes|CONFIG_VP9_SUPERFRAME_BSF=yes|CONFIG_SWRESAMPLE=yes' ffbuild/config.mak
 
       - name: Build FFmpeg libraries
         run: |
@@ -151,7 +153,7 @@ jobs:
       - name: Link optimized threaded browser transcoder
         run: |
           mkdir -p dist
-          emcc -include src/native_checkpoints.h \
+          emcc -include src/native_checkpoints.h -include src/vp8_fastpath.h \
             src/bink2_transcode.c src/opfs_io.c src/debug_trace.c \
             -Isrc -Iffmpeg \
             ffmpeg/libavformat/libavformat.a \
