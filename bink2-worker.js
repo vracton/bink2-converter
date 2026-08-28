@@ -3,7 +3,7 @@ let initializing = null;
 let converting = false;
 
 const workerStartedAt = performance.now();
-const hardwareThreads = Math.max(1, Math.min(16, self.navigator?.hardwareConcurrency || 4));
+const hardwareThreads = Math.max(1, Math.min(8, self.navigator?.hardwareConcurrency || 4));
 const pendingLogs = [];
 let pendingLogChars = 0;
 let logFlushTimer = null;
@@ -30,9 +30,6 @@ function queueLog(text) {
   pendingLogs.push(value);
   pendingLogChars += value.length + 1;
 
-  // FFmpeg can emit thousands of messages in a burst. Posting every line
-  // separately makes the main thread repeatedly rebuild the diagnostics <pre>
-  // and can make conversion look frozen even while the WASM worker is active.
   if (pendingLogs.length >= 128 || pendingLogChars >= 24 * 1024) {
     flushLogs();
   } else if (!logFlushTimer) {
