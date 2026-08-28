@@ -151,8 +151,7 @@ jobs:
       - name: Link optimized threaded browser transcoder
         run: |
           mkdir -p dist
-          emcc -Davformat_find_stream_info=bink2_find_stream_info_fast \
-            src/bink2_transcode.c src/debug_trace.c \
+          emcc src/bink2_transcode.c src/debug_trace.c \
             -Iffmpeg \
             ffmpeg/libavformat/libavformat.a \
             ffmpeg/libavcodec/libavcodec.a \
