@@ -1,4 +1,4 @@
-name: Build and deploy Bink2 converter
+name: Build and deploy Bink converter
 
 on:
   push:
@@ -119,7 +119,7 @@ jobs:
             --enable-avcodec \
             --enable-avformat \
             --enable-swresample \
-            --enable-decoder=bink2,binkaudio_dct,binkaudio_rdft \
+            --enable-decoder=binkvideo,bink2,binkaudio_dct,binkaudio_rdft \
             --enable-demuxer=bink \
             --enable-muxer=webm \
             --enable-encoder=libvpx_vp9,libopus \
@@ -137,7 +137,7 @@ jobs:
             --extra-cflags="-O3 -msimd128 -pthread -I$PREFIX/include -I$PREFIX/include/opus" \
             --extra-ldflags="-O3 -msimd128 -pthread -L$PREFIX/lib" \
             --extra-libs='-lvpx -lopus -lm'
-          grep -E 'CONFIG_BINK2_DECODER=yes|CONFIG_LIBVPX_VP9_ENCODER=yes|CONFIG_LIBOPUS_ENCODER=yes|CONFIG_BINK_DEMUXER=yes|CONFIG_WEBM_MUXER=yes|CONFIG_VP9_SUPERFRAME_BSF=yes|CONFIG_SWRESAMPLE=yes' ffbuild/config.mak
+          grep -E 'CONFIG_BINKVIDEO_DECODER=yes|CONFIG_BINK2_DECODER=yes|CONFIG_LIBVPX_VP9_ENCODER=yes|CONFIG_LIBOPUS_ENCODER=yes|CONFIG_BINK_DEMUXER=yes|CONFIG_WEBM_MUXER=yes|CONFIG_VP9_SUPERFRAME_BSF=yes|CONFIG_SWRESAMPLE=yes' ffbuild/config.mak
 
       - name: Build FFmpeg libraries
         run: |
@@ -152,8 +152,8 @@ jobs:
         run: |
           mkdir -p dist
           emcc -include src/native_checkpoints.h \
-            src/bink2_transcode.c src/debug_trace.c \
-            -Iffmpeg \
+            src/bink2_transcode.c src/opfs_io.c src/debug_trace.c \
+            -Isrc -Iffmpeg \
             ffmpeg/libavformat/libavformat.a \
             ffmpeg/libavcodec/libavcodec.a \
             ffmpeg/libswresample/libswresample.a \
