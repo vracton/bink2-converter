@@ -93,7 +93,6 @@ jobs:
       - name: Configure optimized FFmpeg libraries
         run: |
           cd ffmpeg
-          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
           emconfigure ./configure \
             --target-os=none \
             --arch=x86_32 \
@@ -128,10 +127,11 @@ jobs:
             --ar=emar \
             --ranlib=emranlib \
             --nm=emnm \
-            --pkg-config-flags=--static \
+            --pkg-config=true \
             --optflags='-O3 -msimd128 -pthread' \
-            --extra-cflags="-O3 -msimd128 -pthread -I$PREFIX/include" \
-            --extra-ldflags="-O3 -msimd128 -pthread -L$PREFIX/lib"
+            --extra-cflags="-O3 -msimd128 -pthread -I$PREFIX/include -I$PREFIX/include/opus" \
+            --extra-ldflags="-O3 -msimd128 -pthread -L$PREFIX/lib" \
+            --extra-libs='-lvpx -lopus -lm'
           grep -E 'CONFIG_BINK2_DECODER=yes|CONFIG_LIBVPX_VP9_ENCODER=yes|CONFIG_LIBOPUS_ENCODER=yes|CONFIG_BINK_DEMUXER=yes|CONFIG_WEBM_MUXER=yes|CONFIG_VP9_SUPERFRAME_BSF=yes|CONFIG_SWRESAMPLE=yes' ffbuild/config.mak
 
       - name: Build FFmpeg libraries
