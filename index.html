@@ -3,165 +3,68 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Convert Bink 2 (.bk2) videos to WebM locally in your browser, with transparency and audio preservation.">
+  <meta name="description" content="Convert Bink (.bik) and Bink 2 (.bk2) videos to WebM locally in your browser, with transparency and audio preservation.">
   <meta name="theme-color" content="#0a0b0f">
-  <title>Bink2 Converter</title>
+  <title>Bink Converter</title>
   <script src="./coi-serviceworker.js"></script>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <div class="backdrop" aria-hidden="true"></div>
-
   <header class="site-header">
-    <a class="brand" href="./" aria-label="Bink2 Converter home">
-      <span class="brand-mark">B2</span>
-      <span>Bink2 Converter</span>
-    </a>
-    <div class="header-badges">
-      <span class="pill"><span class="status-dot"></span>Local only</span>
-      <a class="pill link-pill" href="https://github.com/vracton/bink2-converter" target="_blank" rel="noreferrer">GitHub</a>
-    </div>
+    <a class="brand" href="./" aria-label="Bink Converter home"><span class="brand-mark">B</span><span>Bink Converter</span></a>
+    <div class="header-badges"><span class="pill"><span class="status-dot"></span>Local only</span><a class="pill link-pill" href="https://github.com/vracton/bink2-converter" target="_blank" rel="noreferrer">GitHub</a></div>
   </header>
 
   <main class="page-shell">
     <section class="hero">
-      <div class="eyebrow">BK2 → WebM</div>
-      <h1>Convert Bink 2 video<br><span>without uploading it.</span></h1>
-      <p>Runs entirely in your browser. Transparency is preserved when present, Bink audio is transcoded to Opus, and long conversions use a multithreaded WebAssembly core.</p>
+      <div class="eyebrow">BIK / BK2 → WebM</div>
+      <h1>Convert Bink video<br><span>without uploading it.</span></h1>
+      <p>Runs entirely in your browser. Large inputs and outputs stream through disk-backed OPFS when supported, transparency is preserved when present, and Bink audio is transcoded to Opus.</p>
     </section>
 
     <section class="app-card" aria-labelledby="converter-heading">
-      <div class="card-heading">
-        <div>
-          <h2 id="converter-heading">Converter</h2>
-          <p id="engineText">Starting decoder…</p>
-        </div>
-        <span id="engineBadge" class="engine-badge loading"><span></span>Loading</span>
-      </div>
-
-      <div id="dropZone" class="drop-zone" tabindex="0" role="button" aria-label="Choose a Bink 2 file">
-        <input id="fileInput" type="file" accept=".bk2,video/bink" hidden>
-        <div class="upload-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3"/></svg>
-        </div>
-        <div class="drop-copy">
-          <strong>Drop a .bk2 file here</strong>
-          <span>or click to choose a file</span>
-        </div>
+      <div class="card-heading"><div><h2 id="converter-heading">Converter</h2><p id="engineText">Starting decoder…</p></div><span id="engineBadge" class="engine-badge loading"><span></span>Loading</span></div>
+      <div id="dropZone" class="drop-zone" tabindex="0" role="button" aria-label="Choose a Bink file">
+        <input id="fileInput" type="file" accept=".bk2,.bik,video/bink" hidden>
+        <div class="upload-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3"/></svg></div>
+        <div class="drop-copy"><strong>Drop a .bk2 or .bik file here</strong><span>or click to choose a file</span></div>
         <button id="browseButton" class="secondary-button" type="button">Choose file</button>
       </div>
 
       <div id="filePanel" class="file-panel hidden">
-        <div class="file-summary">
-          <div class="file-symbol">BK2</div>
-          <div class="file-title-wrap">
-            <strong id="fileName"></strong>
-            <span id="fileSubline"></span>
-          </div>
-          <button id="replaceButton" class="ghost-button" type="button">Replace</button>
-        </div>
-
+        <div class="file-summary"><div class="file-symbol">BINK</div><div class="file-title-wrap"><strong id="fileName"></strong><span id="fileSubline"></span></div><button id="replaceButton" class="ghost-button" type="button">Replace</button></div>
         <div id="metadataGrid" class="metadata-grid"></div>
-
         <div class="settings-section">
-          <div class="section-title-row">
-            <div>
-              <h3>Output settings</h3>
-              <p>Defaults are tuned for fast browser conversion with good visual quality.</p>
-            </div>
-          </div>
+          <div class="section-title-row"><div><h3>Output settings</h3><p>Defaults are tuned for fast browser conversion with good visual quality.</p></div></div>
           <div class="settings-grid">
-            <label class="setting-field">
-              <span>Quality</span>
-              <select id="qualitySelect">
-                <option value="8">Very high</option>
-                <option value="18" selected>High</option>
-                <option value="28">Standard</option>
-                <option value="36">Small file</option>
-              </select>
-            </label>
-            <label class="setting-field">
-              <span>Encoding speed</span>
-              <select id="speedSelect">
-                <option value="8" selected>Fastest</option>
-                <option value="7">Faster</option>
-                <option value="5">Balanced</option>
-                <option value="3">Slower / smaller</option>
-              </select>
-            </label>
+            <label class="setting-field"><span>Quality</span><select id="qualitySelect"><option value="8">Very high</option><option value="18" selected>High</option><option value="28">Standard</option><option value="36">Small file</option></select></label>
+            <label class="setting-field"><span>Encoding speed</span><select id="speedSelect"><option value="8" selected>Fastest</option><option value="7">Faster</option><option value="5">Balanced</option><option value="3">Slower / smaller</option></select></label>
           </div>
           <div id="formatNote" class="format-note"></div>
         </div>
-
         <div id="errorBox" class="message error-message hidden" role="alert"></div>
-
-        <div id="idleActions" class="primary-actions">
-          <button id="convertButton" class="primary-button" type="button" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>
-            Convert to WebM
-          </button>
-        </div>
-
+        <div id="idleActions" class="primary-actions"><button id="convertButton" class="primary-button" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>Convert to WebM</button></div>
         <div id="progressPanel" class="progress-panel hidden" aria-live="polite">
-          <div class="progress-topline">
-            <div>
-              <strong id="progressTitle">Preparing conversion…</strong>
-              <span id="progressDetail">0%</span>
-            </div>
-            <button id="cancelButton" class="ghost-button danger" type="button">Cancel</button>
-          </div>
+          <div class="progress-topline"><div><strong id="progressTitle">Preparing conversion…</strong><span id="progressDetail">0%</span></div><button id="cancelButton" class="ghost-button danger" type="button">Cancel</button></div>
           <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
-          <div class="progress-stats">
-            <div><span>Elapsed</span><strong id="elapsedValue">0:00</strong></div>
-            <div><span>Speed</span><strong id="fpsValue">—</strong></div>
-            <div><span>Remaining</span><strong id="etaValue">—</strong></div>
-            <div><span>Frame</span><strong id="frameValue">0 / 0</strong></div>
-          </div>
+          <div class="progress-stats"><div><span>Elapsed</span><strong id="elapsedValue">0:00</strong></div><div><span>Speed</span><strong id="fpsValue">—</strong></div><div><span>Remaining</span><strong id="etaValue">—</strong></div><div><span>Frame</span><strong id="frameValue">0 / 0</strong></div></div>
         </div>
       </div>
     </section>
 
     <section id="resultCard" class="result-card hidden">
-      <div class="result-heading">
-        <div class="success-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="m6.5 12.5 3.5 3.5 7.5-8"/></svg>
-        </div>
-        <div>
-          <div class="eyebrow success-eyebrow">Conversion complete</div>
-          <h2 id="resultTitle">Your WebM is ready</h2>
-          <p id="resultMeta"></p>
-        </div>
-        <a id="downloadButton" class="primary-button download-button" download>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14"/></svg>
-          Download
-        </a>
-      </div>
-
-      <div id="previewStage" class="preview-stage">
-        <video id="previewVideo" controls playsinline></video>
-      </div>
-      <div class="result-footer">
-        <span id="previewNote"></span>
-        <button id="convertAnotherButton" class="text-button" type="button">Convert another file</button>
-      </div>
+      <div class="result-heading"><div class="success-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6.5 12.5 3.5 3.5 7.5-8"/></svg></div><div><div class="eyebrow success-eyebrow">Conversion complete</div><h2 id="resultTitle">Your WebM is ready</h2><p id="resultMeta"></p></div><a id="downloadButton" class="primary-button download-button" download><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14"/></svg>Download</a></div>
+      <div id="previewStage" class="preview-stage"><video id="previewVideo" controls playsinline></video></div>
+      <div class="result-footer"><span id="previewNote"></span><button id="convertAnotherButton" class="text-button" type="button">Convert another file</button></div>
     </section>
 
-    <details class="diagnostics" open>
-      <summary>Debug trace (temporary)</summary>
-      <div class="diagnostics-body">
-        <div class="diagnostic-row"><span>Browser isolation</span><strong id="isolationValue">Checking…</strong></div>
-        <div class="diagnostic-row"><span>Worker threads</span><strong id="threadValue">—</strong></div>
-        <div class="diagnostic-row"><span>Input handling</span><strong id="workerFsValue">—</strong></div>
-        <pre id="logOutput"></pre>
-      </div>
+    <details class="diagnostics">
+      <summary>Diagnostics</summary>
+      <div class="diagnostics-body"><div class="diagnostic-row"><span>Browser isolation</span><strong id="isolationValue">Checking…</strong></div><div class="diagnostic-row"><span>Worker threads</span><strong id="threadValue">—</strong></div><div class="diagnostic-row"><span>File I/O</span><strong id="workerFsValue">—</strong></div><pre id="logOutput"></pre></div>
     </details>
   </main>
-
-  <footer class="site-footer">
-    <span>Files stay on this device.</span>
-    <span>FFmpeg · libvpx · libopus · WebAssembly</span>
-  </footer>
-
+  <footer class="site-footer"><span>Files stay on this device.</span><span>FFmpeg · libvpx · libopus · OPFS · WebAssembly</span></footer>
   <script src="./app.js" defer></script>
 </body>
 </html>
