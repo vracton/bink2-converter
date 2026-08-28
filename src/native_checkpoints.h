@@ -8,6 +8,7 @@
 #include <libavutil/audio_fifo.h>
 #include <libavutil/frame.h>
 #include <libswresample/swresample.h>
+#include "opfs_io.h"
 
 static inline const char *b2_codec_name(const AVCodecContext *ctx) {
     return (ctx && ctx->codec && ctx->codec->name) ? ctx->codec->name : "unknown";
@@ -22,11 +23,24 @@ static inline int b2_avformat_open_input(AVFormatContext **ps, const char *url,
                                          const AVInputFormat *fmt,
                                          AVDictionary **options) {
     b2_checkpoint("BEFORE", "avformat_open_input");
-    int ret = avformat_open_input(ps, url, fmt, options);
-    fprintf(stderr, "[bink2-native] AFTER avformat_open_input ret=%d streams=%u\n",
-            ret, (ret >= 0 && ps && *ps) ? (*ps)->nb_streams : 0);
+    int ret;
+    if (bink2_opfs_is_active() && !fmt && !options) {
+        ret = bink2_opfs_open_input(ps, url);
+    } else {
+        ret = avformat_open_input(ps, url, fmt, options);
+    }
+    fprintf(stderr, "[bink2-native] AFTER avformat_open_input ret=%d streams=%u io=%s\n",
+            ret, (ret >= 0 && ps && *ps) ? (*ps)->nb_streams : 0,
+            bink2_opfs_is_active() ? "OPFS" : "MEMFS");
     fflush(stderr);
     return ret;
+}
+
+static inline void b2_avformat_close_input(AVFormatContext **ps) {
+    if (bink2_opfs_is_active())
+        bink2_opfs_close_input(ps);
+    else
+        avformat_close_input(ps);
 }
 
 static inline int b2_avformat_find_stream_info(AVFormatContext *ic,
@@ -57,15 +71,13 @@ static inline int b2_avcodec_open2(AVCodecContext *avctx, const AVCodec *codec,
                                    AVDictionary **options) {
     const char *name = codec && codec->name ? codec->name : "unknown";
 
-    /* Keep the expensive VP9 encoder multithreaded, but do not let the Bink2
-       decoder reserve another full FFmpeg thread pool. In a browser the
-       Emscripten pthread pool is finite; opening both decoder=8 and VP9=8 can
-       exhaust the pre-created workers and deadlock when the first frame is
-       actually dispatched. Bink decode is cheap relative to 4K VP9 encode. */
-    if (avctx && strcmp(name, "binkvideo2") == 0 && avctx->thread_count > 1) {
+    /* Preserve the finite browser pthread pool for libvpx. Bink/Bink2 decode is
+       much cheaper than 4K VP9 encoding, so both Bink decoders stay single-threaded. */
+    if (avctx && (strcmp(name, "binkvideo2") == 0 || strcmp(name, "binkvideo") == 0) &&
+        avctx->thread_count > 1) {
         fprintf(stderr,
-                "[bink2-native] limiting binkvideo2 decoder threads %d -> 1 to preserve browser pthread pool\n",
-                avctx->thread_count);
+                "[bink2-native] limiting %s decoder threads %d -> 1 to preserve browser pthread pool\n",
+                name, avctx->thread_count);
         avctx->thread_count = 1;
     }
 
@@ -104,14 +116,27 @@ static inline AVStream *b2_avformat_new_stream(AVFormatContext *s,
 
 static inline int b2_avio_open(AVIOContext **s, const char *url, int flags) {
     b2_checkpoint("BEFORE", "avio_open");
-    int ret = avio_open(s, url, flags);
-    fprintf(stderr, "[bink2-native] AFTER avio_open ret=%d\n", ret);
+    int ret;
+    if (bink2_opfs_is_active() && (flags & AVIO_FLAG_WRITE))
+        ret = bink2_opfs_open_output(s);
+    else
+        ret = avio_open(s, url, flags);
+    fprintf(stderr, "[bink2-native] AFTER avio_open ret=%d io=%s\n",
+            ret, bink2_opfs_is_active() ? "OPFS" : "MEMFS");
     fflush(stderr);
     return ret;
 }
 
+static inline int b2_avio_closep(AVIOContext **s) {
+    if (bink2_opfs_is_active())
+        return bink2_opfs_close_output(s);
+    return avio_closep(s);
+}
+
 static inline int b2_avformat_write_header(AVFormatContext *s,
                                             AVDictionary **options) {
+    if (s && bink2_opfs_is_active())
+        s->flags |= AVFMT_FLAG_CUSTOM_IO;
     fprintf(stderr, "[bink2-native] BEFORE avformat_write_header streams=%u\n",
             s ? s->nb_streams : 0);
     fflush(stderr);
@@ -311,12 +336,14 @@ static inline int b2_av_interleaved_write_frame(AVFormatContext *s, AVPacket *pk
 }
 
 #define avformat_open_input             b2_avformat_open_input
+#define avformat_close_input            b2_avformat_close_input
 #define avformat_find_stream_info       b2_avformat_find_stream_info
 #define av_find_best_stream             b2_av_find_best_stream
 #define avcodec_open2                   b2_avcodec_open2
 #define avformat_alloc_output_context2  b2_avformat_alloc_output_context2
 #define avformat_new_stream             b2_avformat_new_stream
 #define avio_open                       b2_avio_open
+#define avio_closep                     b2_avio_closep
 #define avformat_write_header           b2_avformat_write_header
 #define av_read_frame                   b2_av_read_frame
 #define avcodec_send_packet             b2_avcodec_send_packet
