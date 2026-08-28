@@ -85,7 +85,8 @@ jobs:
             --disable-shared \
             --enable-static \
             --disable-doc \
-            --disable-extra-programs
+            --disable-extra-programs \
+            --disable-intrinsics
           emmake make -j"$(nproc)"
           emmake make install
 
