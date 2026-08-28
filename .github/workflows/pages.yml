@@ -26,6 +26,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Validate web app
+        run: |
+          node --check app.js
+          node --check bink2-worker.js
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -155,6 +160,7 @@ jobs:
             "$PREFIX/lib/libvpx.a" \
             "$PREFIX/lib/libopus.a" \
             -lm -O3 -msimd128 -pthread --no-entry \
+            -lworkerfs.js \
             -sMODULARIZE=1 \
             -sEXPORT_NAME=createBink2Core \
             -sENVIRONMENT=web,worker,node \
@@ -166,7 +172,7 @@ jobs:
             -sPTHREAD_POOL_SIZE=8 \
             -sPTHREAD_POOL_SIZE_STRICT=0 \
             -sEXPORTED_FUNCTIONS='["_transcode_bk2","_bink2_last_error"]' \
-            -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","ccall"]' \
+            -sEXPORTED_RUNTIME_METHODS='["FS","WORKERFS","UTF8ToString","ccall"]' \
             -o dist/bink2-core.js
           cp ffmpeg/COPYING.LGPLv2.1 dist/
           cp libvpx/LICENSE dist/LICENSE.libvpx
@@ -178,7 +184,7 @@ jobs:
         run: |
           rm -rf _site
           mkdir -p _site/core
-          cp index.html bink2-worker.js coi-serviceworker.js _site/
+          cp index.html app.js styles.css bink2-worker.js coi-serviceworker.js _site/
           cp dist/* _site/core/
           touch _site/.nojekyll
 
