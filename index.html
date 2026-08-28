@@ -3,154 +3,165 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Convert Bink 2 (.bk2) videos to WebM with alpha and audio entirely in your browser.">
-  <title>Bink2 → WebM</title>
+  <meta name="description" content="Convert Bink 2 (.bk2) videos to WebM locally in your browser, with transparency and audio preservation.">
+  <meta name="theme-color" content="#0a0b0f">
+  <title>Bink2 Converter</title>
   <script src="./coi-serviceworker.js"></script>
-  <style>
-    :root{color-scheme:dark;--bg:#0f1015;--panel:#181a22;--line:#303441;--text:#f5f6fa;--muted:#9ca3b3;--accent:#8ba4ff;--bad:#ff8080}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-    main{width:min(980px,calc(100% - 32px));margin:40px auto 64px}h1{font-size:clamp(28px,5vw,48px);margin:0 0 8px;letter-spacing:-.035em}p{color:var(--muted)}
-    .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;margin-top:20px}
-    #drop{border:1.5px dashed #555d72;border-radius:13px;padding:34px 20px;text-align:center;cursor:pointer;transition:.15s}#drop.drag{border-color:var(--accent);background:#202539}#drop strong{display:block;font-size:18px;color:var(--text)}
-    input[type=file]{display:none}.row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-top:16px}.datum{background:#11131a;border-radius:10px;padding:10px 12px}.datum span{display:block;color:var(--muted);font-size:12px}.datum b{font-weight:600;overflow-wrap:anywhere}
-    label.control{display:flex;align-items:center;gap:8px;color:var(--muted)}select,input[type=number]{background:#101218;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}button,.download{appearance:none;border:0;border-radius:10px;background:var(--accent);color:#0d1122;font-weight:700;padding:10px 16px;text-decoration:none;cursor:pointer}button:disabled,.download.disabled{opacity:.4;pointer-events:none}
-    .status{margin-left:auto;color:var(--muted);font-size:13px}.error{color:var(--bad);white-space:pre-wrap;margin-top:12px}.progress{height:8px;background:#0c0d12;border-radius:20px;overflow:hidden;margin-top:16px}.progress>div{width:0;height:100%;background:var(--accent);transition:width .1s}.hidden{display:none!important}
-    .preview{margin-top:16px;border-radius:12px;overflow:hidden;min-height:260px;display:grid;place-items:center;background-color:#d5d5d5;background-image:linear-gradient(45deg,#aaa 25%,transparent 25%),linear-gradient(-45deg,#aaa 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#aaa 75%),linear-gradient(-45deg,transparent 75%,#aaa 75%);background-size:32px 32px;background-position:0 0,0 16px,16px -16px,-16px 0}video{display:block;max-width:100%;max-height:70vh}
-    code{background:#11131a;border-radius:5px;padding:2px 5px}.fine{font-size:12px}.log{font:12px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace;max-height:150px;overflow:auto;color:#858da0;white-space:pre-wrap}
-  </style>
+  <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-<main>
-  <h1>Bink2 → WebM</h1>
-  <p>Decode Bink 2 entirely in your browser. Non-transparent videos use the faster VP8 path, alpha videos use VP9-alpha, and Bink audio is transcoded to Opus. Files never leave your device.</p>
+  <div class="backdrop" aria-hidden="true"></div>
 
-  <section class="panel">
-    <label id="drop" for="file">
-      <strong>Drop a .bk2 file here</strong>
-      <span>or click to choose one</span>
-    </label>
-    <input id="file" type="file" accept=".bk2">
-    <div id="meta" class="meta hidden"></div>
-  </section>
-
-  <section class="panel">
-    <div class="row">
-      <label class="control">Quality (CRF)
-        <input id="crf" type="number" min="0" max="63" value="18" size="3">
-      </label>
-      <label class="control">Speed
-        <select id="cpu"><option value="3">slower</option><option value="5">balanced</option><option value="7">faster</option><option value="8" selected>fastest</option></select>
-      </label>
-      <button id="convert" disabled>Convert</button>
-      <span id="coreStatus" class="status">Loading decoder…</span>
+  <header class="site-header">
+    <a class="brand" href="./" aria-label="Bink2 Converter home">
+      <span class="brand-mark">B2</span>
+      <span>Bink2 Converter</span>
+    </a>
+    <div class="header-badges">
+      <span class="pill"><span class="status-dot"></span>Local only</span>
+      <a class="pill link-pill" href="https://github.com/vracton/bink2-converter" target="_blank" rel="noreferrer">GitHub</a>
     </div>
-    <div id="progressWrap" class="progress hidden"><div id="progress"></div></div>
-    <div id="error" class="error hidden"></div>
-  </section>
+  </header>
 
-  <section id="result" class="panel hidden">
-    <div class="row">
-      <div><strong id="resultTitle">WebM</strong><div id="outInfo" class="fine"></div></div>
-      <a id="download" class="download disabled" download>Download WebM</a>
-    </div>
-    <div class="preview"><video id="preview" controls loop playsinline></video></div>
-    <p id="previewNote" class="fine"></p>
-  </section>
+  <main class="page-shell">
+    <section class="hero">
+      <div class="eyebrow">BK2 → WebM</div>
+      <h1>Convert Bink 2 video<br><span>without uploading it.</span></h1>
+      <p>Runs entirely in your browser. Transparency is preserved when present, Bink audio is transcoded to Opus, and long conversions use a multithreaded WebAssembly core.</p>
+    </section>
 
-  <details class="panel"><summary>Decoder log</summary><div id="log" class="log"></div></details>
-</main>
-<script>
-(() => {
-  const $ = id => document.getElementById(id);
-  const fileInput=$('file'),drop=$('drop'),meta=$('meta'),convert=$('convert'),coreStatus=$('coreStatus');
-  const progressWrap=$('progressWrap'),progress=$('progress'),error=$('error'),result=$('result'),preview=$('preview'),download=$('download'),outInfo=$('outInfo'),log=$('log'),resultTitle=$('resultTitle'),previewNote=$('previewNote');
-  let selected=null,selectedHeader=null,coreReady=false,busy=false,outputURL=null,coreThreads=1,workerFS=false,startTime=0,lastProgressTime=0,lastProgressFrame=0;
+    <section class="app-card" aria-labelledby="converter-heading">
+      <div class="card-heading">
+        <div>
+          <h2 id="converter-heading">Converter</h2>
+          <p id="engineText">Starting decoder…</p>
+        </div>
+        <span id="engineBadge" class="engine-badge loading"><span></span>Loading</span>
+      </div>
 
-  if(!window.crossOriginIsolated){
-    coreStatus.textContent=window.isSecureContext?'Enabling multithreaded decoder…':'Threaded decoder requires HTTPS or localhost';
-    if(!window.isSecureContext)showError('This build uses SharedArrayBuffer for multithreaded encoding and must be served from HTTPS or localhost.');
-    return;
-  }
+      <div id="dropZone" class="drop-zone" tabindex="0" role="button" aria-label="Choose a Bink 2 file">
+        <input id="fileInput" type="file" accept=".bk2,video/bink" hidden>
+        <div class="upload-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3"/></svg>
+        </div>
+        <div class="drop-copy">
+          <strong>Drop a .bk2 file here</strong>
+          <span>or click to choose a file</span>
+        </div>
+        <button id="browseButton" class="secondary-button" type="button">Choose file</button>
+      </div>
 
-  const worker=new Worker('./bink2-worker.js');
-  worker.onmessage=e=>{
-    const m=e.data||{};
-    if(m.type==='ready'){
-      coreThreads=m.threads||1;workerFS=!!m.workerfs;coreReady=true;coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;updateConvert();
-    }else if(m.type==='progress'){
-      progressWrap.classList.remove('hidden');
-      if(m.total>0)progress.style.width=Math.min(100,m.frame/m.total*100)+'%';
-      const now=performance.now();
-      let speed='';
-      if(lastProgressTime && m.frame>lastProgressFrame){
-        const fps=(m.frame-lastProgressFrame)/((now-lastProgressTime)/1000);
-        if(fps>0){
-          const remain=m.total>m.frame?Math.round((m.total-m.frame)/fps):0;
-          speed=` · ${fps.toFixed(1)} fps${remain?` · ~${formatTime(remain)} left`:''}`;
-        }
-      }
-      if(!lastProgressTime || now-lastProgressTime>=1000){lastProgressTime=now;lastProgressFrame=m.frame}
-      coreStatus.textContent=m.total>0?`Encoding ${m.frame}/${m.total} · ${coreThreads} threads${speed}`:`Encoding frame ${m.frame} · ${coreThreads} threads`;
-    }else if(m.type==='done'){
-      busy=false;progress.style.width='100%';
-      const elapsed=(performance.now()-startTime)/1000;
-      coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;
-      const blob=new Blob([m.data],{type:'video/webm'});
-      if(outputURL)URL.revokeObjectURL(outputURL);
-      outputURL=URL.createObjectURL(blob);preview.src=outputURL;preview.load();
-      download.href=outputURL;download.download=(selected?.name||'video').replace(/\.bk2$/i,'')+'.webm';download.classList.remove('disabled');
-      const audio=m.surroundDownmix?'stereo Opus (8-channel Bink downmix)':m.audioTracks?`${m.audioTracks} Opus audio stream${m.audioTracks===1?'':'s'}`:'no audio';
-      resultTitle.textContent=`${m.codec||'WebM'} WebM`;
-      outInfo.textContent=`${formatBytes(blob.size)} · ${m.frames} frames · ${audio} · ${elapsed.toFixed(1)} s`;
-      previewNote.textContent=selectedHeader?.alpha?'The checkerboard is the page background. Seeing it through the video confirms transparent playback.':'Audio is preserved when present. The source file is read directly from disk without first copying it into the WASM heap.';
-      result.classList.remove('hidden');updateConvert();
-    }else if(m.type==='error'){
-      busy=false;coreStatus.textContent=coreReady?`Decoder ready · ${coreThreads} threads`:'Decoder error';showError(m.message||'Conversion failed.');updateConvert();
-    }else if(m.type==='log'){
-      log.textContent+=(m.text||'')+'\n';log.scrollTop=log.scrollHeight;
-    }
-  };
-  worker.onerror=e=>{showError(`Worker error: ${e.message}`);coreStatus.textContent='Decoder error'};
+      <div id="filePanel" class="file-panel hidden">
+        <div class="file-summary">
+          <div class="file-symbol">BK2</div>
+          <div class="file-title-wrap">
+            <strong id="fileName"></strong>
+            <span id="fileSubline"></span>
+          </div>
+          <button id="replaceButton" class="ghost-button" type="button">Replace</button>
+        </div>
 
-  function formatBytes(n){if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KiB';return(n/1048576).toFixed(1)+' MiB'}
-  function formatTime(s){if(s<60)return`${s}s`;const m=Math.floor(s/60),r=s%60;return`${m}m ${r}s`}
-  function showError(s){error.textContent=s;error.classList.remove('hidden')}
-  function clearError(){error.textContent='';error.classList.add('hidden')}
-  function updateConvert(){convert.disabled=!selected||!coreReady||busy}
-  function parseBK2(buf){
-    if(buf.byteLength<44)throw new Error('File is too short to be a Bink 2 file.');
-    const bytes=new Uint8Array(buf,0,4),magic=String.fromCharCode(...bytes);
-    if(!/^KB2./.test(magic))throw new Error(`Expected Bink 2 (KB2), found ${JSON.stringify(magic)}.`);
-    const v=new DataView(buf),frames=v.getUint32(8,true),width=v.getUint32(20,true),height=v.getUint32(24,true),fpsNum=v.getUint32(28,true),fpsDen=v.getUint32(32,true),flags=v.getUint32(36,true),tracks=v.getUint32(40,true);
-    if(!width||!height||!frames)throw new Error('The Bink 2 header contains invalid dimensions or frame count.');
-    return{magic,frames,width,height,fpsNum,fpsDen,flags,tracks,alpha:!!(flags&0x00100000)};
-  }
-  function renderMeta(f,h){
-    const fps=h.fpsDen?h.fpsNum/h.fpsDen:0,codec=h.alpha?'VP9-alpha':'VP8 fast path';
-    const audio=h.tracks===8?'8-channel Bink → stereo Opus':h.tracks?`${h.tracks} track${h.tracks===1?'':'s'} → Opus`:'none';
-    const items=[['File',f.name],['Revision',h.magic],['Size',formatBytes(f.size)],['Resolution',`${h.width}×${h.height}`],['Frames',String(h.frames)],['Frame rate',fps?`${fps.toFixed(3).replace(/\.000$/,'')} fps`:'unknown'],['Alpha',h.alpha?'yes':'no'],['Output video',codec],['Audio',audio]];
-    meta.innerHTML=items.map(([k,v])=>`<div class="datum"><span>${k}</span><b>${escapeHTML(v)}</b></div>`).join('');meta.classList.remove('hidden');
-  }
-  function escapeHTML(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-  async function chooseFile(f){
-    clearError();result.classList.add('hidden');progressWrap.classList.add('hidden');progress.style.width='0';
-    if(!f)return;
-    try{const head=await f.slice(0,64).arrayBuffer(),h=parseBK2(head);selected=f;selectedHeader=h;renderMeta(f,h);updateConvert()}
-    catch(e){selected=null;selectedHeader=null;meta.classList.add('hidden');showError(e.message);updateConvert()}
-  }
-  fileInput.addEventListener('change',()=>chooseFile(fileInput.files[0]));
-  for(const ev of ['dragenter','dragover'])drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')});
-  for(const ev of ['dragleave','drop'])drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag')});
-  drop.addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f)chooseFile(f)});
-  convert.addEventListener('click',()=>{
-    if(!selected||!coreReady||busy)return;
-    busy=true;clearError();result.classList.add('hidden');download.classList.add('disabled');progressWrap.classList.remove('hidden');progress.style.width='0';coreStatus.textContent=workerFS?'Opening input directly…':'Preparing input…';updateConvert();
-    startTime=performance.now();lastProgressTime=0;lastProgressFrame=0;
-    try{
-      worker.postMessage({type:'convert',file:selected,crf:Number($('crf').value),cpuUsed:Number($('cpu').value),threads:coreThreads,alpha:selectedHeader.alpha,audioTracks:selectedHeader.tracks});
-    }catch(e){busy=false;showError(e.message);coreStatus.textContent=`Decoder ready · ${coreThreads} threads`;updateConvert()}
-  });
-})();
-</script>
+        <div id="metadataGrid" class="metadata-grid"></div>
+
+        <div class="settings-section">
+          <div class="section-title-row">
+            <div>
+              <h3>Output settings</h3>
+              <p>Defaults are tuned for fast browser conversion with good visual quality.</p>
+            </div>
+          </div>
+          <div class="settings-grid">
+            <label class="setting-field">
+              <span>Quality</span>
+              <select id="qualitySelect">
+                <option value="8">Very high</option>
+                <option value="18" selected>High</option>
+                <option value="28">Standard</option>
+                <option value="36">Small file</option>
+              </select>
+            </label>
+            <label class="setting-field">
+              <span>Encoding speed</span>
+              <select id="speedSelect">
+                <option value="8" selected>Fastest</option>
+                <option value="7">Faster</option>
+                <option value="5">Balanced</option>
+                <option value="3">Slower / smaller</option>
+              </select>
+            </label>
+          </div>
+          <div id="formatNote" class="format-note"></div>
+        </div>
+
+        <div id="errorBox" class="message error-message hidden" role="alert"></div>
+
+        <div id="idleActions" class="primary-actions">
+          <button id="convertButton" class="primary-button" type="button" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>
+            Convert to WebM
+          </button>
+        </div>
+
+        <div id="progressPanel" class="progress-panel hidden" aria-live="polite">
+          <div class="progress-topline">
+            <div>
+              <strong id="progressTitle">Preparing conversion…</strong>
+              <span id="progressDetail">0%</span>
+            </div>
+            <button id="cancelButton" class="ghost-button danger" type="button">Cancel</button>
+          </div>
+          <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+          <div class="progress-stats">
+            <div><span>Elapsed</span><strong id="elapsedValue">0:00</strong></div>
+            <div><span>Speed</span><strong id="fpsValue">—</strong></div>
+            <div><span>Remaining</span><strong id="etaValue">—</strong></div>
+            <div><span>Frame</span><strong id="frameValue">0 / 0</strong></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="resultCard" class="result-card hidden">
+      <div class="result-heading">
+        <div class="success-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="m6.5 12.5 3.5 3.5 7.5-8"/></svg>
+        </div>
+        <div>
+          <div class="eyebrow success-eyebrow">Conversion complete</div>
+          <h2 id="resultTitle">Your WebM is ready</h2>
+          <p id="resultMeta"></p>
+        </div>
+        <a id="downloadButton" class="primary-button download-button" download>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14"/></svg>
+          Download
+        </a>
+      </div>
+
+      <div id="previewStage" class="preview-stage">
+        <video id="previewVideo" controls playsinline></video>
+      </div>
+      <div class="result-footer">
+        <span id="previewNote"></span>
+        <button id="convertAnotherButton" class="text-button" type="button">Convert another file</button>
+      </div>
+    </section>
+
+    <details class="diagnostics">
+      <summary>Diagnostics</summary>
+      <div class="diagnostics-body">
+        <div class="diagnostic-row"><span>Browser isolation</span><strong id="isolationValue">Checking…</strong></div>
+        <div class="diagnostic-row"><span>Worker threads</span><strong id="threadValue">—</strong></div>
+        <div class="diagnostic-row"><span>Direct file access</span><strong id="workerFsValue">—</strong></div>
+        <pre id="logOutput"></pre>
+      </div>
+    </details>
+  </main>
+
+  <footer class="site-footer">
+    <span>Files stay on this device.</span>
+    <span>FFmpeg · libvpx · libopus · WebAssembly</span>
+  </footer>
+
+  <script src="./app.js" defer></script>
 </body>
 </html>
