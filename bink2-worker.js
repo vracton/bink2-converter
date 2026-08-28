@@ -109,7 +109,8 @@ async function convert(message){
     const crf=Number.isFinite(message.crf)?message.crf:18;
     const cpuUsed=Number.isFinite(message.cpuUsed)?message.cpuUsed:8;
     const threads=Math.max(1,Math.min(hardwareThreads,Number.isFinite(message.threads)?message.threads:hardwareThreads));
-    log(`Starting ${info.mode.toUpperCase()} transcode: ${info.path}, threads=${threads}`);
+    const codec=message.alpha?'VP9':'VP8';
+    log(`Starting ${info.mode.toUpperCase()} transcode: ${info.path}, codec=${codec}, threads=${threads}`);
     const frames=module.ccall('transcode_bk2','number',['string','string','number','number','number'],[info.path,output,crf,cpuUsed,threads]);
     if(frames<0){
       const ptr=module._bink2_last_error();
@@ -124,11 +125,11 @@ async function convert(message){
       const file=await info.outputHandle.getFile();
       info=null;
       log(`OPFS output complete: ${size} bytes; no WebM accumulated in WASM`);
-      send('done',{jobId,file,frames,threads,codec:'VP9',audioTracks:message.audioTracks||0,outputMode:'opfs'});
+      send('done',{jobId,file,frames,threads,codec,audioTracks:message.audioTracks||0,outputMode:'opfs'});
     }else{
       const bytes=module.FS.readFile(output),shared=typeof SharedArrayBuffer!=='undefined'&&bytes.buffer instanceof SharedArrayBuffer;
       const data=bytes.byteOffset===0&&bytes.byteLength===bytes.buffer.byteLength&&!shared?bytes.buffer:bytes.slice().buffer;
-      send('done',{jobId,data,frames,threads,codec:'VP9',audioTracks:message.audioTracks||0,outputMode:'memfs'},[data]);
+      send('done',{jobId,data,frames,threads,codec,audioTracks:message.audioTracks||0,outputMode:'memfs'},[data]);
     }
   }finally{
     closeOpfs(module,info);
