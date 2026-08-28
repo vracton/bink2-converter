@@ -2,10 +2,16 @@ let core = null;
 let initializing = null;
 let converting = false;
 
+const workerStartedAt = performance.now();
 const hardwareThreads = Math.max(1, Math.min(16, self.navigator?.hardwareConcurrency || 4));
 
 function send(type, payload = {}, transfer = []) {
   self.postMessage({ type, ...payload }, transfer);
+}
+
+function trace(text) {
+  const elapsed = ((performance.now() - workerStartedAt) / 1000).toFixed(3);
+  send('log', { text: `[worker +${elapsed}s] ${text}` });
 }
 
 function getWorkerFS(module) {
@@ -17,18 +23,25 @@ async function init() {
   if (initializing) return initializing;
   initializing = (async () => {
     try {
+      trace('Importing ./core/bink2-core.js');
       importScripts('./core/bink2-core.js');
+      trace('WASM loader script imported');
       if (typeof createBink2Core !== 'function') throw new Error('Bink2 WASM loader did not define createBink2Core().');
+      trace('Instantiating Emscripten module');
       core = await createBink2Core({
         locateFile(path) {
-          return new URL('./core/' + path, self.location.href).href;
+          const url = new URL('./core/' + path, self.location.href).href;
+          trace(`locateFile ${path} -> ${url}`);
+          return url;
         },
-        print(text) { send('log', { text }); },
-        printErr(text) { send('log', { text: '[stderr] ' + text }); }
+        print(text) { trace(`[stdout] ${text}`); },
+        printErr(text) { trace(`[stderr] ${text}`); }
       });
+      trace(`Emscripten module ready; WORKERFS=${!!getWorkerFS(core)}; hardwareThreads=${hardwareThreads}`);
       send('ready', { threads: hardwareThreads, workerfs: !!getWorkerFS(core) });
       return core;
     } catch (err) {
+      trace(`Initialization failed: ${err?.stack || err?.message || String(err)}`);
       send('error', { message: 'Could not load the Bink2 decoder: ' + (err?.message || String(err)) });
       throw err;
     }
@@ -39,41 +52,50 @@ async function init() {
 async function stageBrowserFile(module, file, path, jobId) {
   const CHUNK_SIZE = 16 * 1024 * 1024;
   const size = file.size;
+  trace(`Staging browser File into MEMFS: name=${file.name} size=${size} bytes chunkSize=${CHUNK_SIZE}`);
 
   module.FS.writeFile(path, new Uint8Array(0));
+  trace(`Created ${path}`);
   module.FS.truncate(path, size);
+  trace(`Preallocated ${path} to ${size} bytes`);
   const stream = module.FS.open(path, 'r+');
+  trace(`Opened ${path} for chunked writes`);
   try {
     let loaded = 0;
+    let chunkIndex = 0;
     while (loaded < size) {
       const end = Math.min(size, loaded + CHUNK_SIZE);
+      trace(`Reading input chunk ${chunkIndex}: ${loaded}-${end}`);
       const chunk = new Uint8Array(await file.slice(loaded, end).arrayBuffer());
+      trace(`Writing input chunk ${chunkIndex}: ${chunk.byteLength} bytes`);
       module.FS.write(stream, chunk, 0, chunk.byteLength, loaded);
       loaded = end;
+      chunkIndex++;
       send('input-progress', { jobId, loaded, total: size });
+      trace(`Input staged: ${loaded}/${size} bytes`);
     }
   } finally {
     module.FS.close(stream);
+    trace(`Closed staged input file ${path}`);
   }
 }
 
 async function prepareInput(module, message, jobId) {
   const copiedInput = '/input.bk2';
 
-  // FFmpeg performs many small seeks while probing Bink. Reading those through
-  // WORKERFS turns each seek into a synchronous Blob read and can leave large
-  // files at frame 0 for a long time. Stage into MEMFS once instead. Chunking
-  // avoids holding a second full-file ArrayBuffer in JavaScript while copying.
   if (message.file) {
+    trace('Input mode: browser File -> chunked MEMFS staging');
     send('input-mode', { jobId, mode: 'staged' });
     await stageBrowserFile(module, message.file, copiedInput, jobId);
     return { path: copiedInput };
   }
 
   if (message.data) {
+    trace(`Input mode: ArrayBuffer -> MEMFS (${message.data.byteLength} bytes)`);
     send('input-mode', { jobId, mode: 'memory' });
     module.FS.writeFile(copiedInput, new Uint8Array(message.data));
     send('input-progress', { jobId, loaded: message.data.byteLength, total: message.data.byteLength });
+    trace('ArrayBuffer input written to MEMFS');
     return { path: copiedInput };
   }
 
@@ -84,11 +106,13 @@ async function convert(message) {
   if (converting) throw new Error('A conversion is already running.');
   converting = true;
   const jobId = message.jobId ?? 0;
+  trace(`Conversion job ${jobId} accepted`);
   const module = await init();
   const output = '/output.webm';
   let inputInfo = null;
 
   try {
+    trace('Cleaning stale MEMFS input/output files');
     try { module.FS.unlink('/input.bk2'); } catch (_) {}
     try { module.FS.unlink(output); } catch (_) {}
     inputInfo = await prepareInput(module, message, jobId);
@@ -98,6 +122,10 @@ async function convert(message) {
     const threads = Math.max(1, Math.min(hardwareThreads,
       Number.isFinite(message.threads) ? message.threads : hardwareThreads));
 
+    trace(`Input ready at ${inputInfo.path}`);
+    trace(`Calling transcode_bk2(input=${inputInfo.path}, output=${output}, crf=${crf}, cpuUsed=${cpuUsed}, threads=${threads}, alpha=${!!message.alpha}, audioTracks=${message.audioTracks || 0})`);
+    trace('FFmpeg AV_LOG_TRACE output begins below');
+
     const frames = module.ccall(
       'transcode_bk2',
       'number',
@@ -105,18 +133,24 @@ async function convert(message) {
       [inputInfo.path, output, crf, cpuUsed, threads]
     );
 
+    trace(`transcode_bk2 returned ${frames}`);
+
     if (frames < 0) {
       const ptr = module._bink2_last_error();
       const reason = ptr ? module.UTF8ToString(ptr) : 'Unknown decoder error';
+      trace(`Native error: ${reason}`);
       throw new Error(reason || 'Bink2 conversion failed.');
     }
 
+    trace(`Reading completed WebM from ${output}`);
     const bytes = module.FS.readFile(output);
+    trace(`WebM read from MEMFS: ${bytes.byteLength} bytes`);
     const shared = typeof SharedArrayBuffer !== 'undefined' && bytes.buffer instanceof SharedArrayBuffer;
     const result = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength && !shared
       ? bytes.buffer
       : bytes.slice().buffer;
 
+    trace(`Posting completed job ${jobId} to UI`);
     send('done', {
       jobId,
       data: result,
@@ -126,20 +160,25 @@ async function convert(message) {
       audioTracks: message.audioTracks || 0
     }, [result]);
   } finally {
+    trace(`Cleaning job ${jobId} files`);
     try { module.FS.unlink(output); } catch (_) {}
     try { module.FS.unlink('/input.bk2'); } catch (_) {}
     converting = false;
+    trace(`Conversion job ${jobId} finished/aborted`);
   }
 }
 
 self.onmessage = async event => {
   const message = event.data || {};
   if (message.type !== 'convert') return;
+  trace(`Received message type=${message.type} jobId=${message.jobId ?? 0}`);
   try {
     await convert(message);
   } catch (err) {
+    trace(`Conversion exception: ${err?.stack || err?.message || String(err)}`);
     send('error', { jobId: message.jobId ?? 0, message: err?.message || String(err) });
   }
 };
 
+trace('Worker script loaded');
 init().catch(() => {});
