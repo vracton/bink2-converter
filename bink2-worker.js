@@ -12,6 +12,10 @@ function send(type, payload = {}, transfer = []) {
   self.postMessage({ type, ...payload }, transfer);
 }
 
+function elapsedPrefix() {
+  return `[worker +${((performance.now() - workerStartedAt) / 1000).toFixed(3)}s]`;
+}
+
 function flushLogs() {
   if (logFlushTimer) {
     clearTimeout(logFlushTimer);
@@ -38,8 +42,17 @@ function queueLog(text) {
 }
 
 function trace(text) {
-  const elapsed = ((performance.now() - workerStartedAt) / 1000).toFixed(3);
-  queueLog(`[worker +${elapsed}s] ${text}`);
+  queueLog(`${elapsedPrefix()} ${text}`);
+}
+
+// Native WASM calls are synchronous. A setTimeout-based log batch cannot flush
+// until ccall() returns, which hid every C/FFmpeg checkpoint while conversion
+// was running. Native stdout/stderr therefore bypasses the batch queue.
+function nativeLog(channel, text) {
+  const value = String(text || '');
+  if (!value) return;
+  flushLogs();
+  send('log', { text: `${elapsedPrefix()} [${channel}] ${value}` });
 }
 
 function getWorkerFS(module) {
@@ -62,8 +75,8 @@ async function init() {
           trace(`locateFile ${path} -> ${url}`);
           return url;
         },
-        print(text) { trace(`[stdout] ${text}`); },
-        printErr(text) { trace(`[stderr] ${text}`); }
+        print(text) { nativeLog('stdout', text); },
+        printErr(text) { nativeLog('stderr', text); }
       });
       trace(`Emscripten module ready; WORKERFS=${!!getWorkerFS(core)}; hardwareThreads=${hardwareThreads}`);
       flushLogs();
