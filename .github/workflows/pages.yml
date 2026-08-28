@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -47,11 +47,12 @@ jobs:
           sed -i 's/c->has_alpha = c->flags & BINK_FLAG_ALPHA;/c->has_alpha = !!(c->flags \& BINK_FLAG_ALPHA);/' libavcodec/bink2.c
           grep -F 'c->has_alpha = !!(c->flags & BINK_FLAG_ALPHA);' libavcodec/bink2.c
 
-      - name: Build libvpx VP9 encoder for WASM
+      - name: Build multithreaded libvpx VP9 encoder for WASM
         run: |
           git clone --depth 1 --branch v1.16.0 https://chromium.googlesource.com/webm/libvpx libvpx
           mkdir -p "$PREFIX"
           cd libvpx
+          CFLAGS='-O3 -msimd128 -pthread' LDFLAGS='-pthread' \
           emconfigure ./configure \
             --prefix="$PREFIX" \
             --target=generic-gnu \
@@ -65,15 +66,30 @@ jobs:
             --enable-vp9 \
             --enable-vp9-encoder \
             --disable-vp9-decoder \
-            --disable-multithread \
+            --enable-multithread \
             --disable-runtime-cpu-detect \
             --disable-webm-io \
             --disable-libyuv \
-            --extra-cflags=-Oz
+            --extra-cflags='-O3 -msimd128 -pthread'
           emmake make -j"$(nproc)"
           emmake make install
 
-      - name: Configure compact FFmpeg libraries
+      - name: Build libopus for WASM audio output
+        run: |
+          curl -fL https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz -o opus.tar.gz
+          tar -xzf opus.tar.gz
+          cd opus-1.5.2
+          CFLAGS='-O3 -msimd128 -pthread' LDFLAGS='-pthread' \
+          emconfigure ./configure \
+            --prefix="$PREFIX" \
+            --disable-shared \
+            --enable-static \
+            --disable-doc \
+            --disable-extra-programs
+          emmake make -j"$(nproc)"
+          emmake make install
+
+      - name: Configure optimized FFmpeg libraries
         run: |
           cd ffmpeg
           export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
@@ -91,29 +107,31 @@ jobs:
             --disable-network \
             --disable-iconv \
             --disable-runtime-cpudetect \
-            --disable-pthreads \
+            --enable-pthreads \
             --disable-w32threads \
             --disable-os2threads \
             --disable-programs \
             --enable-avcodec \
             --enable-avformat \
+            --enable-swresample \
             --enable-decoder=bink2,binkaudio_dct,binkaudio_rdft \
             --enable-demuxer=bink \
             --enable-muxer=webm \
-            --enable-encoder=libvpx_vp9 \
+            --enable-encoder=libvpx_vp9,libopus \
             --enable-bsf=vp9_superframe \
             --enable-protocol=file \
             --enable-libvpx \
+            --enable-libopus \
             --cc=emcc \
             --cxx=em++ \
             --ar=emar \
             --ranlib=emranlib \
             --nm=emnm \
             --pkg-config-flags=--static \
-            --optflags=-Oz \
-            --extra-cflags="-Oz -I$PREFIX/include" \
-            --extra-ldflags="-Oz -L$PREFIX/lib"
-          grep -E 'CONFIG_BINK2_DECODER=yes|CONFIG_LIBVPX_VP9_ENCODER=yes|CONFIG_BINK_DEMUXER=yes|CONFIG_WEBM_MUXER=yes|CONFIG_VP9_SUPERFRAME_BSF=yes' ffbuild/config.mak
+            --optflags='-O3 -msimd128 -pthread' \
+            --extra-cflags="-O3 -msimd128 -pthread -I$PREFIX/include" \
+            --extra-ldflags="-O3 -msimd128 -pthread -L$PREFIX/lib"
+          grep -E 'CONFIG_BINK2_DECODER=yes|CONFIG_LIBVPX_VP9_ENCODER=yes|CONFIG_LIBOPUS_ENCODER=yes|CONFIG_BINK_DEMUXER=yes|CONFIG_WEBM_MUXER=yes|CONFIG_VP9_SUPERFRAME_BSF=yes|CONFIG_SWRESAMPLE=yes' ffbuild/config.mak
 
       - name: Build FFmpeg libraries
         run: |
@@ -121,30 +139,37 @@ jobs:
           emmake make -j"$(nproc)" \
             libavformat/libavformat.a \
             libavcodec/libavcodec.a \
+            libswresample/libswresample.a \
             libavutil/libavutil.a
 
-      - name: Link browser transcoder module
+      - name: Link optimized threaded browser transcoder
         run: |
           mkdir -p dist
           emcc src/bink2_transcode.c \
             -Iffmpeg \
             ffmpeg/libavformat/libavformat.a \
             ffmpeg/libavcodec/libavcodec.a \
+            ffmpeg/libswresample/libswresample.a \
             ffmpeg/libavutil/libavutil.a \
             "$PREFIX/lib/libvpx.a" \
-            -lm -Oz --no-entry \
+            "$PREFIX/lib/libopus.a" \
+            -lm -O3 -msimd128 -pthread --no-entry \
             -sMODULARIZE=1 \
             -sEXPORT_NAME=createBink2Core \
-            -sENVIRONMENT=worker \
+            -sENVIRONMENT=web,worker,node \
             -sFORCE_FILESYSTEM=1 \
             -sALLOW_MEMORY_GROWTH=1 \
-            -sINITIAL_MEMORY=268435456 \
+            -sINITIAL_MEMORY=536870912 \
             -sMAXIMUM_MEMORY=2147483648 \
+            -sMEMORY_GROWTH_GEOMETRIC_STEP=0.5 \
+            -sPTHREAD_POOL_SIZE=8 \
+            -sPTHREAD_POOL_SIZE_STRICT=0 \
             -sEXPORTED_FUNCTIONS='["_transcode_bk2","_bink2_last_error"]' \
             -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","ccall"]' \
             -o dist/bink2-core.js
           cp ffmpeg/COPYING.LGPLv2.1 dist/
           cp libvpx/LICENSE dist/LICENSE.libvpx
+          cp opus-1.5.2/COPYING dist/LICENSE.opus
           file dist/*
           du -h dist/*
 
@@ -152,7 +177,7 @@ jobs:
         run: |
           rm -rf _site
           mkdir -p _site/core
-          cp index.html bink2-worker.js _site/
+          cp index.html bink2-worker.js coi-serviceworker.js _site/
           cp dist/* _site/core/
           touch _site/.nojekyll
 
