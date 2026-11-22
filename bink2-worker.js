@@ -1,5 +1,6 @@
 let core=null,initializing=null,converting=false;
 const started=performance.now();
+const BUILD_VERSION='20261121-vp8-decoderfix1';
 const hardwareThreads=Math.max(1,Math.min(8,self.navigator?.hardwareConcurrency||4));
 function send(type,payload={},transfer=[]){self.postMessage({type,...payload},transfer)}
 function stamp(){return `[worker +${((performance.now()-started)/1000).toFixed(3)}s]`}
@@ -13,10 +14,10 @@ async function init(){
   if(initializing)return initializing;
   initializing=(async()=>{
     log('Importing WASM core');
-    importScripts('./core/bink2-core.js');
+    importScripts(`./core/bink2-core.js?v=${BUILD_VERSION}`);
     if(typeof createBink2Core!=='function')throw new Error('Bink WASM loader is missing.');
     core=await createBink2Core({
-      locateFile:path=>new URL('./core/'+path,self.location.href).href,
+      locateFile:path=>{const u=new URL('./core/'+path,self.location.href);u.searchParams.set('v',BUILD_VERSION);return u.href},
       print:text=>nativeLog('stdout',text),
       printErr:text=>nativeLog('stderr',text)
     });
