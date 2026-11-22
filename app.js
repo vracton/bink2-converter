@@ -1,5 +1,6 @@
 (() => {
   'use strict';
+  const BUILD_VERSION='20261121-vp8-decoderfix1';
   const $=id=>document.getElementById(id);
   const ui={
     dropZone:$('dropZone'),fileInput:$('fileInput'),browseButton:$('browseButton'),filePanel:$('filePanel'),fileName:$('fileName'),fileSubline:$('fileSubline'),replaceButton:$('replaceButton'),metadataGrid:$('metadataGrid'),formatNote:$('formatNote'),qualitySelect:$('qualitySelect'),speedSelect:$('speedSelect'),convertButton:$('convertButton'),idleActions:$('idleActions'),progressPanel:$('progressPanel'),progressTitle:$('progressTitle'),progressDetail:$('progressDetail'),progressBar:$('progressBar'),cancelButton:$('cancelButton'),elapsedValue:$('elapsedValue'),fpsValue:$('fpsValue'),etaValue:$('etaValue'),frameValue:$('frameValue'),errorBox:$('errorBox'),engineText:$('engineText'),engineBadge:$('engineBadge'),resultCard:$('resultCard'),resultTitle:$('resultTitle'),resultMeta:$('resultMeta'),downloadButton:$('downloadButton'),previewStage:$('previewStage'),previewVideo:$('previewVideo'),previewNote:$('previewNote'),convertAnotherButton:$('convertAnotherButton'),isolationValue:$('isolationValue'),threadValue:$('threadValue'),workerFsValue:$('workerFsValue'),logOutput:$('logOutput')
@@ -45,7 +46,7 @@
   function destroyWorker(){state.worker?.terminate();state.worker=null;state.workerReady=false}
   function createWorker(){
     destroyWorker();state.phase=state.file?'ready':'booting';setEngine('loading','Loading','Starting the multithreaded decoder…');ui.threadValue.textContent=ui.workerFsValue.textContent='—';
-    let w;try{w=new Worker('./bink2-worker.js')}catch(e){state.phase='error';showError(`Could not start worker: ${e?.message||e}`);return}state.worker=w;
+    let w;try{w=new Worker(`./bink2-worker.js?v=${BUILD_VERSION}`)}catch(e){state.phase='error';showError(`Could not start worker: ${e?.message||e}`);return}state.worker=w;
     w.onmessage=e=>{const m=e.data||{};if(m.jobId!=null&&m.jobId!==state.jobId)return;switch(m.type){
       case'ready':state.workerReady=true;state.workerThreads=m.threads||1;state.phase=state.file?'ready':'idle';setEngine('ready','Ready',`${state.workerThreads} worker thread${state.workerThreads===1?'':'s'} available`);ui.threadValue.textContent=String(state.workerThreads);ui.workerFsValue.textContent=m.opfs?'OPFS streaming available':'MEMFS fallback';updateControls();break;
       case'input-mode':ui.workerFsValue.textContent=m.mode==='opfs'?'OPFS streaming (disk-backed)':m.mode==='staged'?'Chunked MEMFS fallback':'Memory input';ui.progressTitle.textContent='Loading Bink…';break;
